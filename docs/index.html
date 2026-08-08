@@ -151,9 +151,7 @@ let tessWorker=null;
 async function ensureTesseract(){
   if(tessWorker)return tessWorker;
   if(typeof Tesseract==='undefined')throw new Error('Tesseract not loaded');
-  tessWorker=await Tesseract.createWorker({logger:m=>{if(m.status==='recognizing text')diag("OCR "+(Math.round(m.progress*100))+"%");}});
-  await tessWorker.loadLanguage('eng');
-  await tessWorker.initialize('eng');
+  tessWorker=await Tesseract.createWorker('eng');
   return tessWorker;
 }
 async function runOcr(canvas){
