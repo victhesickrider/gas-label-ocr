@@ -25,6 +25,7 @@ input[type=file]{color:var(--mut)}
 .src{font-size:11px;padding:2px 6px;border-radius:5px;text-align:center}
 .src.ok{background:rgba(55,214,122,.15);color:var(--ok)}
 .src.empty{background:rgba(154,163,178,.12);color:var(--mut)}
+.src.ocr{background:rgba(79,140,255,.15);color:var(--acc)}
 .banner{padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:10px}
 .banner.info{background:rgba(79,140,255,.12);color:var(--acc)}
 .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--line);color:var(--mut);margin-left:6px}
@@ -36,6 +37,7 @@ input[type=file]{color:var(--mut)}
 .spinner{width:42px;height:42px;border:4px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 pre#diag{white-space:pre-wrap;font:11px ui-monospace,monospace;color:var(--mut);max-height:200px;overflow:auto;margin:8px 0 0}
+progress{width:100%;height:10px}
 </style>
 </head>
 <body>
@@ -47,11 +49,12 @@ pre#diag{white-space:pre-wrap;font:11px ui-monospace,monospace;color:var(--mut);
       <button id="cropBtn" class="sec" disabled>Crop &amp; decode (4 taps)</button>
       <button id="decodeFullBtn" class="sec" disabled>Decode full image</button>
     </div>
-    <p class="banner info" id="gateBanner">Upload a label photo. Tap "Crop &amp; decode" and mark the 4 corners of the white label (TL, TR, BR, BL). The barcode is decoded first; remaining fields can be filled manually.</p>
+    <p class="banner info" id="gateBanner">Upload a label photo. Tap "Crop &amp; decode" and mark the 4 corners of the white label (TL, TR, BR, BL). Barcode + OCR run automatically — no manual entry needed.</p>
     <div class="stage" id="stage">
       <img id="preview" class="hidden" alt="preview">
       <div id="dots"></div>
     </div>
+    <div id="libStatus" class="row" style="margin-top:10px"></div>
   </div>
   <div class="card hidden" id="diagCard">
     <div class="row" style="justify-content:space-between">
@@ -72,6 +75,12 @@ pre#diag{white-space:pre-wrap;font:11px ui-monospace,monospace;color:var(--mut);
   </div>
 </div>
 <div id="busy" class="hidden"><div class="spinner"></div></div>
+
+<!-- Libraries (pinned, from jsDelivr). CSP on GitHub Pages is permissive for script-src. -->
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/dist/zxing.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/opencv-js-wasm@4.8.1/opencv.js"></script>
+
 <script>
 const $=id=>document.getElementById(id);
 const diag=m=>{const d=$("diag");if(d){d.textContent+=(m+"\n");$("diagCard").classList.remove("hidden");}};
@@ -79,128 +88,86 @@ const clearDiag=()=>{const d=$("diag");if(d)d.textContent="";};
 const now=()=>performance.now();
 const busy=on=>$("busy").classList.toggle("hidden",!on);
 
+/* ---------- lib readiness ---------- */
+const libs={zxing:false,tesseract:false,opencv:false};
+function refreshLibStatus(){
+  const s=$("libStatus");if(!s)return;
+  const tag=(name,ok)=>`<span class="pill" style="background:${ok?'rgba(55,214,122,.15)':'rgba(255,92,92,.15)'};color:${ok?'var(--ok)':'var(--bad)'}">${name}: ${ok?'ready':'loading'}</span>`;
+  s.innerHTML=tag('ZXing',libs.zxing)+tag('Tesseract',libs.tesseract)+tag('OpenCV',libs.opencv);
+}
+refreshLibStatus();
+function waitFor(key,pred,ms=30000){return new Promise((res,rej)=>{const t0=now();const iv=setInterval(()=>{if(pred()){clearInterval(iv);res(true);}else if(now()-t0>ms){clearInterval(iv);rej(new Error(key+' not ready'));}},150);});}
+
 /* ---------- GS1 parser ---------- */
 function luhnOk(digits){if(!/^\d+$/.test(digits)||digits.length<2)return false;let s=0,alt=false;for(let i=digits.length-1;i>=0;i--){let d=digits.charCodeAt(i)-48;if(alt){d*=2;if(d>9)d-=9}s+=d;alt=!alt;}return s%10===0;}
 function normDate(v){const m=v.match(/^(\d{2})[./\-](\d{2})[./\-](\d{2,4})$/);if(!m)return null;let[_,d,mo,y]=m;if(y.length===2)y=(parseInt(y)<=50?"20":"19")+y;if(!(1<=+d&&+d<=31&&1<=+mo&&+mo<=12&&2020<=+y&&+y<=2050))return null;return y+mo+d;}
 const AI={"00":{t:"sscc",len:18},"01":{t:"gtin",len:14},"02":{t:"gtin",len:14},"10":{t:"batch",v:1},"11":{t:"prodDate",len:6},"13":{t:"bestBefore",len:6},"15":{t:"bestBefore",len:6},"17":{t:"prodDate",len:6},"37":{t:"quantity",v:1},"240":{t:"sku",v:1}};
 function parseParen(s){const out={};for(const p of s.split(/(?=\()/)){const m=p.match(/^\((\d{2,4})\)(.*)$/);if(!m)continue;let ai=m[1],val=m[2].trim();if(ai.length===4&&["310","311","330"].includes(ai.slice(0,3))){const dec=+ai[3];if(/^\d+$/.test(val))out.quantity=String(Math.round(+val/Math.pow(10,dec)));ai=ai.slice(0,3);}const sp=AI[ai];if(!sp)continue;const t=sp.t;if(t==="sscc"){if(luhnOk(val)&&/^\d{18}$/.test(val))out.sscc=val;}else if(t==="gtin"){if(luhnOk(val)&&/^\d{14}$/.test(val))out.gtin=val;}else if(t==="bestBefore"||t==="prodDate"){const nd=normDate(val);if(nd)out[t]=nd;}else if(t==="quantity"){out.quantity=String(parseInt(val.replace(/\D/g,""))||0);}else if(t==="batch"){out.batch=val;}else if(t==="sku"){out.sku=val;}}return out;}
 function parseBare(s){const out={};if(/^\d{17,18}$/.test(s)){let v=s.length===18?s:("0"+s).slice(-18);out.sscc=v;return out;}let i=0;while(i<s.length){if(i+2>s.length)break;const ai=s.slice(i,i+2);let ok=false;if(ai==="00"&&i+20<=s.length){const v=s.slice(i+2,i+20);if(/^\d{18}$/.test(v)){out.sscc=v;i+=20;ok=true;}}else if((ai==="01"||ai==="02")&&i+16<=s.length){const v=s.slice(i+2,i+16);if(/^\d{14}$/.test(v)){out.gtin=v;i+=16;ok=true;}}else if(["11","13","15","17"].includes(ai)&&i+8<=s.length){const v=s.slice(i+2,i+8);if(/^\d{6}$/.test(v)){out[AI[ai].t]=v;i+=8;ok=true;}}else if(ai==="37"&&i+2<s.length){let j=i+2;while(j<s.length&&s[j]>="0"&&s[j]<="9")j++;const v=s.slice(i+2,j);if(v){out.quantity=String(parseInt(v));i=j;ok=true;}}else if((ai==="10"||ai==="240")&&i+2<s.length){out[ai==="10"?"batch":"sku"]=s.slice(i+2);i=s.length;ok=true;}if(!ok)break;}return out;}
-function parseGs1(raw){
-  const s=(raw||"").replace(/[^\x20-\x7E]/g,"");
-  if(s.includes("("))return parseParen(s);
-  return parseBare(s);
+function parseGs1(raw){const s=(raw||"").replace(/[^\x20-\x7E]/g,"");if(s.includes("("))return parseParen(s);return parseBare(s);}
+
+/* ---------- OpenCV preprocessing: grayscale + contrast + denoise ---------- */
+function cvPreprocess(inImg){
+  if(typeof cv==='undefined'||!cv||!cv.imread)return null;
+  try{
+    const src=cv.imread(inImg);
+    const gray=new cv.Mat();
+    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+    const out=new cv.Mat();
+    cv.threshold(gray,out,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU);
+    const den=new cv.Mat();
+    cv.medianBlur(out,den,3);
+    const canvas=document.createElement("canvas");
+    canvas.width=inImg.width||inImg.naturalWidth;canvas.height=inImg.height||inImg.naturalHeight;
+    cv.imshow(canvas,den);
+    src.delete();gray.delete();out.delete();den.delete();
+    return canvas;
+  }catch(e){diag("OpenCV preprocess error: "+e.message);return null;}
 }
 
-/* ---------- native BarcodeDetector (no eval, CSP-safe) ---------- */
-let BDET=null, BDET_TRIED=false;
-async function ensureDetector(){
-  if(BDET)return true;
-  if(BDET_TRIED)return false;
-  BDET_TRIED=true;
-  if('BarcodeDetector' in window){
+/* ---------- ZXing barcode decode ---------- */
+async function decodeBarcode(canvas){
+  if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
+  try{
+    const list=ZXing.BarcodeFormat;
+    const hints=new Map();
+    const fmts=[ZXing.BarcodeFormat.CODE_128,ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.EAN_8,ZXing.BarcodeFormat.UPC_A,ZXing.BarcodeFormat.UPC_E,ZXing.BarcodeFormat.DATA_MATRIX,ZXing.BarcodeFormat.QR_CODE,ZXing.BarcodeFormat.PDF_417,ZXing.BarcodeFormat.CODE_39,ZXing.BarcodeFormat.ITF];
+    const reader=new ZXing.MultiFormatReader();
+    const hd=new Map();hd.set(ZXing.DecodeHintType.TRY_HARDER,true);hd.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,fmts);
+    reader.setHints(hd);
+    const img=new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+    const bmp=ZXing.BinaryBitmap.fromLuminanceSource(img);
+    const results=[];
     try{
-      const fmts=await BarcodeDetector.getSupportedFormats();
-      const want=fmts.filter(f=>/code_128|ean|ean_13|ean_8|upc|data_matrix|qr|pdf417/i.test(f));
-      if(!want.includes('code_128')&&fmts.includes('code_128'))want.push('code_128');
-      BDET=new BarcodeDetector({formats:want.length?want:undefined});
-      diag("BarcodeDetector ready ("+want.join(",")+")");
-      return true;
-    }catch(e){ diag("BarcodeDetector init error: "+e.message); }
-  }else{
-    diag("BarcodeDetector unsupported in this browser.");
-  }
-  return false;
+      let res=reader.decode(bmp);
+      while(res){results.push(res.getText());try{res=reader.decode(bmp);}catch(_){break;}}
+    }catch(e){/* may throw when no more */}
+    return results;
+  }catch(e){diag("ZXing error: "+e.message);return [];}
 }
 
-/* ---------- preprocessing: upscale + grayscale + contrast ---------- */
-function preprocessCanvas(inImg){
-  const scale=2.6;
-  const w=inImg.width, h=inImg.height;
-  const out=document.createElement("canvas");
-  out.width=Math.max(1,Math.round(w*scale));
-  out.height=Math.max(1,Math.round(h*scale));
-  const oc=out.getContext("2d");
-  oc.imageSmoothingEnabled=true;
-  oc.drawImage(inImg,0,0,out.width,out.height);
-  const id=oc.getImageData(0,0,out.width,out.height);
-  const d=id.data;
-  let mn=255,mx=0;
-  for(let i=0;i<d.length;i+=4){const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];if(g<mn)mn=g;if(g>mx)mx=g;}
-  if(mx<=mn)mx=mn+1;
-  for(let i=0,j=0;i<d.length;i+=4,j+=4){
-    let g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
-    g=(g-mn)/(mx-mn)*255;
-    d[i]=d[i+1]=d[i+2]=g;
-  }
-  oc.putImageData(id,0,0);
-  return out;
+/* ---------- Tesseract OCR ---------- */
+let tessWorker=null;
+async function ensureTesseract(){
+  if(tessWorker)return tessWorker;
+  if(typeof Tesseract==='undefined')throw new Error('Tesseract not loaded');
+  tessWorker=await Tesseract.createWorker({logger:m=>{if(m.status==='recognizing text')diag("OCR "+(Math.round(m.progress*100))+"%");}});
+  await tessWorker.loadLanguage('eng');
+  await tessWorker.initialize('eng');
+  return tessWorker;
+}
+async function runOcr(canvas){
+  try{
+    const w=await ensureTesseract();
+    const {data}=await w.recognize(canvas);
+    return (data.words||[]).map(word=>({
+      text:word.text,
+      x0:word.bbox.x0,y0:word.bbox.y0,x1:word.bbox.x1,y1:word.bbox.y1
+    }));
+  }catch(e){diag("OCR error: "+e.message);return [];}
 }
 
-/* ---------- homography warp (4 corners) ---------- */
-function imgToCanvas(img){
-  const c=document.createElement("canvas");
-  c.width=img.naturalWidth||img.width;
-  c.height=img.naturalHeight||img.height;
-  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
-  return c;
-}
-function orderCorners(pts){
-  pts=[...pts].map(p=>({x:p.x,y:p.y}));
-  const s=p=>p.x+p.y,d=p=>p.x-p.y;
-  pts.sort((a,b)=>s(a)-s(b));
-  const tl=pts[0],br=pts[3];
-  const mid=pts.slice(1,3).sort((a,b)=>d(a)-d(b));
-  return[tl,mid[0],br,mid[1]];
-}
-function invert3(m){
-  const[a,b,c,d,e,f,g,h,i]=m;
-  const A=e*i-f*h,B=-(d*i-f*g),C=d*h-e*g;
-  const det=a*A+b*B+C*c;
-  if(Math.abs(det)<1e-12)return null;
-  const inv=1/det;
-  return[(e*i-f*h)*inv,(c*h-b*i)*inv,(b*f-c*e)*inv,(f*g-d*i)*inv,(a*i-c*g)*inv,(c*d-a*f)*inv,(d*h-e*g)*inv,(b*g-a*h)*inv,(a*e-b*d)*inv];
-}
-function gauss(M,b){
-  const n=b.length;const A=M.map((r,i)=>[...r,b[i]]);
-  for(let i=0;i<n;i++){
-    let p=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;
-    if(Math.abs(A[p][i])<1e-9)return null;
-    [A[i],A[p]]=[A[p],A[i]];
-    for(let c=i;c<=n;c++)A[i][c]/=A[i][i];
-    for(let r=0;r<n;r++){if(r===i)continue;const f=A[r][i];for(let c=i;c<=n;c++)A[r][c]-=f*A[i][c];}
-  }
-  return A.map(r=>r[n]);
-}
-function getHomography(src,dst){
-  const A=[],B=[];
-  for(let i=0;i<4;i++){
-    const{x:x0,y:y0}=src[i],{x:x1,y:y1}=dst[i];
-    A.push([x0,y0,1,0,0,0,-x1*x0,-x1*y0]);B.push(x1);
-    A.push([0,0,0,x0,y0,1,-y1*x0,-y1*y0]);B.push(y1);
-  }
-  const x=gauss(A,B);
-  if(!x)return null;
-  return[x[0],x[1],x[2],x[3],x[4],x[5],x[6],x[7],1];
-}
-function warpCanvas(img,corners){
-  const p=orderCorners(corners);
-  const wA=Math.max(Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y),Math.hypot(p[2].x-p[3].x,p[2].y-p[3].y));
-  const hA=Math.max(Math.hypot(p[3].x-p[0].x,p[3].y-p[0].y),Math.hypot(p[2].x-p[1].x,p[2].y-p[1].y));
-  const outW=Math.max(400,Math.round(wA)),outH=Math.max(400,Math.round(hA));
-  const dst=[[0,0],[outW-1,0],[outW-1,outH-1],[0,outH-1]];
-  const H=getHomography(p,dst);
-  if(!H)return null;
-  const Hinv=invert3(H);
-  if(!Hinv)return null;
-  const out=document.createElement("canvas");out.width=outW;out.height=outH;
-  const oc=out.getContext("2d");
-  oc.setTransform(Hinv[0],Hinv[3],Hinv[1],Hinv[4],Hinv[2],Hinv[5]);
-  oc.drawImage(img,0,0,img.naturalWidth||img.width,img.naturalHeight||img.height);
-  oc.setTransform(1,0,0,1,0,0);
-  return out;
-}
-
-/* ---------- field anchor extraction ---------- */
+/* ---------- field anchor extraction (no LLM) ---------- */
 const FIELD_ANCHORS={
   sscc:["sscc","serial shipping container","serial number","serial no","ssc"],
   gtin:["gtin","global trade item","barcode","content gtin","content(gtin)"],
@@ -217,7 +184,7 @@ const FIELD_ANCHORS={
 function normStr(s){return(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");}
 function cleanField(f,raw){
   if(!raw)return"";
-  let v=raw.replace(/ /g," ").trim();
+  let v=raw.replace(/ /g," ").trim();
   if(f==="bestBefore"||f==="prodDate"){const n=normDate(v);return n||"";}
   if(f==="quantity"||f==="grossWeight"){const m=v.match(/(\d+(?:\.\d+)?)/);return m?m[1]:"";}
   if(f==="sscc"){const t=v.replace(/\D/g,"");return t.length>=17?t.slice(0,18):"";}
@@ -226,7 +193,6 @@ function cleanField(f,raw){
 }
 function extractFromWords(words){
   const out={};
-  // 1) anchored: only if coords exist (Tesseract path). Otherwise skip to regex fallbacks.
   const withCoord=words.filter(w=>w.x0!=null);
   if(withCoord.length){
     for(const field in FIELD_ANCHORS){
@@ -254,14 +220,12 @@ function extractFromWords(words){
       }
     }
   }
-  // 2) date regex fallback
   if(!out.bestBefore&&!out.prodDate){
     for(const w of words){
       const m=w.text.match(/(\d{2}[./\-]\d{2}[./\-]\d{2,4})/);
       if(m){const nd=normDate(m[1]);if(nd)out[/(best|expiry)/i.test(w.text)?"bestBefore":"prodDate"]=nd;}
     }
   }
-  // 3) long digit runs -> sscc/gtin
   for(const w of words){
     const tok=w.text.replace(/\D/g,"");
     if(tok.length>=17&&!out.sscc)out.sscc=tok.slice(0,18);
@@ -270,30 +234,32 @@ function extractFromWords(words){
   return out;
 }
 
-/* ---------- main decode (BarcodeDetector primary, no eval) ---------- */
+/* ---------- main decode: barcode + OCR, no manual entry ---------- */
 async function runDecode(canvas,label){
   busy(true);
   const t0=now();
   const fields={};
-  const ok=await ensureDetector();
-  if(ok){
-    try{
-      const bin=preprocessCanvas(canvas);
-      const barcodes=await BDET.detect(bin);
-      diag("BarcodeDetector: "+barcodes.length+" barcode"+(barcodes.length===1?"":"s")+" detected");
-      for(const bc of barcodes){
-        const rawValue=bc.rawValue;
-        if(!rawValue||rawValue.length<3)continue;
-        const parsed=parseGs1(rawValue);
-        for(const k in parsed)if(!fields[k])fields[k]=parsed[k];
-        diag("  • "+rawValue+" → "+JSON.stringify(parsed));
-      }
-      if(!Object.keys(fields).length){
-        diag("No GS1 fields parsed from barcode(s); falling back to manual entry.");
-      }
-    }catch(e){diag("BarcodeDetector error: "+e.message);}
-  }else{
-    diag("BarcodeDetector unavailable — showing only manual fields.");
+  let pipe=canvas;
+  // OpenCV preprocess
+  const pp=cvPreprocess(canvas);
+  if(pp){pipe=pp;diag("OpenCV: grayscaled + thresholded.");}
+  else diag("OpenCV unavailable — using original.");
+  // Layer 1: barcode
+  try{
+    const codes=await decodeBarcode(pipe);
+    diag("Barcode: "+codes.length+" found");
+    for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
+  }catch(e){diag("Barcode layer error: "+e.message);}
+  if(!Object.keys(fields).length)diag("No GS1 from barcode; OCR will catch (AI) text.");
+  // Layer 2: OCR
+  const words=await runOcr(pipe);
+  diag("OCR: "+words.length+" words");
+  const ocrFields=extractFromWords(words);
+  for(const k in ocrFields)if(!fields[k])fields[k]=ocrFields[k];
+  // also capture product description as fallback
+  if(!fields.product){
+    const prod=words.find(w=>/fudge|recipe|new/i.test(w.text));
+    if(prod)fields.product=cleanField("product",prod.text);
   }
   $("msPill").textContent=Math.round(now()-t0)+"ms";
   busy(false);
@@ -312,16 +278,80 @@ function renderFields(fields){
     const row=document.createElement("div");row.className="field";
     const lab=document.createElement("label");lab.textContent=k;
     const inp=document.createElement("input");inp.id="in_"+k;inp.value=v;inp.readOnly=!!v;
-    const src=document.createElement("span");src.className="src "+(v?"ok":"empty");src.textContent=v?"ocr":"empty";
+    const src=document.createElement("span");src.className="src "+(v?"ok":"empty");src.textContent=v?"auto":"empty";
     row.appendChild(lab);row.appendChild(inp);row.appendChild(src);box.appendChild(row);
     if(v)locked++;
   }
-  $("confSummary").textContent=locked+" locked · "+(all.length-locked)+" empty";
+  $("confSummary").textContent=locked+" auto · "+(all.length-locked)+" empty";
   $("fieldsCard").classList.remove("hidden");
 }
 function clearCornersUI(){tapCorners=[];$("dots").innerHTML="";}
 function drawDot(x,y,label){const d=document.createElement("div");d.className="dot";d.textContent=label;d.style.left=(x/imgNat.w*100)+"%";d.style.top=(y/imgNat.h*100)+"%";$("dots").appendChild(d);}
-function drawLine(x1,y1,x2,y2){const x=(x1+x2)/2,y=(y1+y2)/2;const len=Math.hypot(x2-x1,y2-y1),ang=Math.atan2(y2-y1,x2-x1)*180/Math.PI;const l=document.createElement("div");l.className="line";l.style.left=(x/imgNat.w*100)+"%";l.style.top=(y/imgNat.h*100)+"%";l.style.width=len+"px";l.style.transform=`rotate(${ang}deg)`;$("dots").appendChild(l);}
+function drawLine(x1,y1,x2,y2){
+  const x=(x1+x2)/2,y=(y1+y2)/2;
+  const len=Math.hypot(x2-x1,y2-y1),ang=Math.atan2(y2-y1,x2-x1)*180/Math.PI;
+  const l=document.createElement("div");l.className="line";
+  l.style.left=(x/imgNat.w*100)+"%";l.style.top=(y/imgNat.h*100)+"%";
+  l.style.width=len+"px";l.style.transform=`rotate(${ang}deg)`;
+  $("dots").appendChild(l);
+}
+function imgToCanvas(img){
+  const c=document.createElement("canvas");
+  c.width=img.naturalWidth||img.width;c.height=img.naturalHeight||img.height;
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+  return c;
+}
+function orderCorners(pts){
+  pts=[...pts].map(p=>({x:p.x,y:p.y}));
+  const s=p=>p.x+p.y,d=p=>p.x-p.y;
+  pts.sort((a,b)=>s(a)-s(b));
+  const tl=pts[0],br=pts[3];
+  const mid=pts.slice(1,3).sort((a,b)=>d(a)-d(b));
+  return[tl,mid[0],br,mid[1]];
+}
+function invert3(m){
+  const [a,b,c,d,e,f,g,h,i]=m;
+  const A=e*i-f*h,B=-(d*i-f*g),C=d*h-e*g;
+  const det=a*A+b*B+C*c;if(Math.abs(det)<1e-12)return null;
+  const inv=1/det;
+  return[(e*i-f*h)*inv,(c*h-b*i)*inv,(b*f-c*e)*inv,(f*g-d*i)*inv,(a*i-c*g)*inv,(c*d-a*f)*inv,(d*h-e*g)*inv,(b*g-a*h)*inv,(a*e-b*d)*inv];
+}
+function gauss(M,b){
+  const n=b.length;const A=M.map((r,i)=>[...r,b[i]]);
+  for(let i=0;i<n;i++){
+    let p=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;
+    if(Math.abs(A[p][i])<1e-9)return null;
+    [A[i],A[p]]=[A[p],A[i]];
+    for(let c=i;c<=n;c++)A[i][c]/=A[i][i];
+    for(let r=0;r<n;r++){if(r===i)continue;const f=A[r][i];for(let c=i;c<=n;c++)A[r][c]-=f*A[i][c];}
+  }
+  return A.map(r=>r[n]);
+}
+function getHomography(src,dst){
+  const A=[],B=[];
+  for(let i=0;i<4;i++){
+    const {x:x0,y:y0}=src[i],{x:x1,y:y1}=dst[i];
+    A.push([x0,y0,1,0,0,0,-x1*x0,-x1*y0]);B.push(x1);
+    A.push([0,0,0,x0,y0,1,-y1*x0,-y1*y0]);B.push(y1);
+  }
+  const x=gauss(A,B);if(!x)return null;
+  return[x[0],x[1],x[2],x[3],x[4],x[5],x[6],x[7],1];
+}
+function warpCanvas(img,corners){
+  const p=orderCorners(corners);
+  const wA=Math.max(Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y),Math.hypot(p[2].x-p[3].x,p[2].y-p[3].y));
+  const hA=Math.max(Math.hypot(p[3].x-p[0].x,p[3].y-p[0].y),Math.hypot(p[2].x-p[1].x,p[2].y-p[1].y));
+  const outW=Math.max(400,Math.round(wA)),outH=Math.max(400,Math.round(hA));
+  const dst=[[0,0],[outW-1,0],[outW-1,outH-1],[0,outH-1]];
+  const H=getHomography(p,dst);if(!H)return null;
+  const Hinv=invert3(H);if(!Hinv)return null;
+  const out=document.createElement("canvas");out.width=outW;out.height=outH;
+  const oc=out.getContext("2d");
+  oc.setTransform(Hinv[0],Hinv[3],Hinv[1],Hinv[4],Hinv[2],Hinv[5]);
+  oc.drawImage(img,0,0,img.naturalWidth||img.width,img.naturalHeight||img.height);
+  oc.setTransform(1,0,0,1,0,0);
+  return out;
+}
 
 imgEl.addEventListener("click",async e=>{
   if(imgEl.classList.contains("hidden")||!cropModeOn)return;
@@ -345,7 +375,7 @@ imgEl.addEventListener("click",async e=>{
   }
 });
 
-$("file").addEventListener("change",e=>{
+$("file").addEventListener("change",async e=>{
   const f=e.target.files[0];if(!f)return;
   clearDiag();clearCornersUI();
   const url=URL.createObjectURL(f);
@@ -356,7 +386,12 @@ $("file").addEventListener("change",e=>{
     $("gateBanner").textContent="Ready. Use 'Crop & decode' for best results, or 'Decode full image'.";
   };
   imgEl.src=url;
+  // warm up libs in background
+  waitFor('zxing',()=>typeof ZXing!=='undefined').then(()=>{libs.zxing=true;refreshLibStatus();}).catch(()=>{libs.zxing=false;refreshLibStatus();});
+  waitFor('tesseract',()=>typeof Tesseract!=='undefined').then(()=>{libs.tesseract=true;refreshLibStatus();}).catch(()=>{libs.tesseract=false;refreshLibStatus();});
+  waitFor('opencv',()=>typeof cv!=='undefined'&&cv.imread).then(()=>{libs.opencv=true;refreshLibStatus();}).catch(()=>{libs.opencv=false;refreshLibStatus();});
 });
+
 $("cropBtn").addEventListener("click",()=>{clearCornersUI();cropModeOn=true;diag("Tap 4 corners of the white label on the photo: TL, TR, BR, BL.");$("gateBanner").textContent="Tapping mode ON — tap TL, TR, BR, BL.";});
 $("decodeFullBtn").addEventListener("click",async()=>{
   const c=imgToCanvas(imgEl);
@@ -372,7 +407,10 @@ $("exportCsv").addEventListener("click",()=>{
     out.push([k,v]);
   }
   const csv=out.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(",")).join("\n");
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="label_fields.csv";a.click();
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="label_fields.csv";
+  a.click();
 });
 </script>
 </body>
