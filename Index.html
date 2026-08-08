@@ -300,11 +300,11 @@ function extractFromWords(words){
     bestBefore:[/best\s*before\s*[:\s]*/i,/expiry\s*date\s*[:\s]*/i,/best\s+before\s+date\s*[:\s]*/i],
     prodDate:[/production\s*date\s*[:\s]*/i,/prod\s*date\s*[:\s]*/i,/gr\s*date\s*[:\s]*/i,/pack\s*date\s*[:\s]*/i],
     quantity:[/quantity\s*[:\s]*/i,/qty\s*[:\s]*/i,/count\s*[:\s]*/i],
-    product:[/product\s+description\s*[:\s]*/i,/material\s+description\s*[:\s]*/i],
-    sku:[/common\s+item\s+code\s*[:\s]*/i,/item\s+code\s*[:\s]*/i],
+    product:[/product\s+(?:description|desc)[:\s]*/i,/material\s+description[:\s]*/i,/contents?[:\s]*/i],
+    sku:[/common\s+item\s+code[:\s]*/i,/item\s+code[:\s]*/i,/product\s*code[:\s]*/i],
     variant:[/variant\s*[:\s]*/i],
-    customerCode:[/customer\s*code\s*[:\s]*/i],
-    grossWeight:[/gross\s*weight\s*[:\s]*/i,/net\s*weight\s*[:\s]*/i,/weight\s*\(\s*kg\s*\)\s*[:\s]*/i]
+    customerCode:[/customer\s*code[:\s]*/i],
+    grossWeight:[/gross\s*weight[:\s]*/i,/net\s*weight[:\s]*/i,/weight\s*\(\s*kg\s*\)[:\s]*/i]
   };
   
   for(const field in PATTERNS){
@@ -325,11 +325,16 @@ function extractFromWords(words){
         }else if(field==='bestBefore'||field==='prodDate'){
           const nd=normDate(cand);
           if(nd)out[field]=nd;
-        }else if(field==='quantity'){
-          const m=cand.match(/^(\d+(?:\.\d+)?)/);
-          if(m)out[field]=m[1];
+        }else if(field==='quantity'||field==='grossWeight'){
+          const cleaned=cand.replace(/\\D/g,'');
+          if(field==='quantity'){const n=+cleaned;if((Number.isInteger(n)||(n>=1&&n<=99999)))out[field]=cleaned;}
+          else if(field==='grossWeight'){const n=parseFloat(cand);if(n>=0.1&&n<=9999)out[field]=n.toString();}
+        }else if(field==='product'||field==='sku'||field==='variant'||field==='customerCode'){
+          // Take text up to next known label or separator
+          const val=(cand.split(/\s{2}|[:;,\n]|(?<=\d)(?=\D)|(?<=\D)(?=\d)/).shift()||'').trim();
+          // Conservative: only accept if it contains expected chars and is short
+          if(val&&val.length<=60&&val.length>=3)out[field]=val;
         }else{
-          // Take first word or until separator
           const val=cand.split(/[\s,:;-]+/)[0];
           if(val)out[field]=val;
         }
