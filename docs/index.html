@@ -106,7 +106,7 @@ function parseParen(s){const out={};for(const p of s.split(/(?=\()/)){const m=p.
 function parseBare(s){const out={};if(/^\d{17,18}$/.test(s)){let v=s.length===18?s:("0"+s).slice(-18);out.sscc=v;return out;}let i=0;while(i<s.length){if(i+2>s.length)break;const ai=s.slice(i,i+2);let ok=false;if(ai==="00"&&i+20<=s.length){const v=s.slice(i+2,i+20);if(/^\d{18}$/.test(v)){out.sscc=v;i+=20;ok=true;}}else if((ai==="01"||ai==="02")&&i+16<=s.length){const v=s.slice(i+2,i+16);if(/^\d{14}$/.test(v)){out.gtin=v;i+=16;ok=true;}}else if(["11","13","15","17"].includes(ai)&&i+8<=s.length){const v=s.slice(i+2,i+8);if(/^\d{6}$/.test(v)){out[AI[ai].t]=v;i+=8;ok=true;}}else if(ai==="37"&&i+2<s.length){let j=i+2;while(j<s.length&&s[j]>="0"&&s[j]<="9")j++;const v=s.slice(i+2,j);if(v){out.quantity=String(parseInt(v));i=j;ok=true;}}else if((ai==="10"||ai==="240")&&i+2<s.length){out[ai==="10"?"batch":"sku"]=s.slice(i+2);i=s.length;ok=true;}if(!ok)break;}return out;}
 function parseGs1(raw){const s=(raw||"").replace(/[^\x20-\x7E]/g,"");if(s.includes("("))return parseParen(s);return parseBare(s);}
 
-/* ---------- OpenCV preprocessing: grayscale + contrast + denoise ---------- */
+/* ---------- OpenCV preprocessing: grayscale + contrast (for OCR enhancement) ---------- */
 function cvPreprocess(inImg){
   if(typeof cv==='undefined'||!cv||!cv.imread)return null;
   try{
@@ -114,7 +114,7 @@ function cvPreprocess(inImg){
     const gray=new cv.Mat();
     cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
     const out=new cv.Mat();
-    cv.threshold(gray,out,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU);
+    cv.normalize(gray,out,0,255,cv.NORM_MINMAX);
     const den=new cv.Mat();
     cv.medianBlur(out,den,3);
     const canvas=document.createElement("canvas");
@@ -237,20 +237,17 @@ async function runDecode(canvas,label){
   busy(true);
   const t0=now();
   const fields={};
-  let pipe=canvas;
-  // OpenCV preprocess
-  const pp=cvPreprocess(canvas);
-  if(pp){pipe=pp;diag("OpenCV: grayscaled + thresholded.");}
-  else diag("OpenCV unavailable — using original.");
-  // Layer 1: barcode
+  // Layer 1: barcode on original warp (OpenCV preprocessing destroys barcode contrast)
   try{
-    const codes=await decodeBarcode(pipe);
+    const codes=await decodeBarcode(canvas);
     diag("Barcode: "+codes.length+" found");
     for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }catch(e){diag("Barcode layer error: "+e.message);}
   if(!Object.keys(fields).length)diag("No GS1 from barcode; OCR will catch (AI) text.");
-  // Layer 2: OCR on original warped canvas (thresholded image hurts Tesseract too much)
-  const words=await runOcr(canvas);
+  // Layer 2: OCR on contrast-enhanced canvas (keeps text readable, better than raw)
+  const pp=cvPreprocess(canvas);
+  const ocrInput=pp||canvas;
+  const words=await runOcr(ocrInput);
   diag("OCR: "+words.length+" words");
   const ocrFields=extractFromWords(words);
   for(const k in ocrFields)if(!fields[k])fields[k]=ocrFields[k];
