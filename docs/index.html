@@ -187,14 +187,9 @@ async function decodeBarcodeFull(imgEl){
 async function runOcr(srcCanvas){
   if(typeof Tesseract==='undefined'){diag("Tesseract not loaded.");return [];}
   try{
-    // Try OpenCV preprocessing first for better OCR quality
-    let pp=cvPreprocess(srcCanvas);
-    if(pp&&pp.width&&pp.height){
-      diag("OpenCV preprocessing applied: "+pp.width+"x"+pp.height);
-    }
-    // Upscale for OCR: ensure min dimension >= 1000px
-    const MIN=1000;
-    let src=pp||srcCanvas;
+    // Simple preprocessing: upscale to improve OCR accuracy
+    const MIN=1200;
+    let src=srcCanvas;
     if(Math.min(src.width,src.height)<MIN){
       const s=MIN/Math.min(src.width,src.height);
       const up=document.createElement('canvas');
