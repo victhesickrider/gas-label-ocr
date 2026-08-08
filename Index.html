@@ -184,20 +184,28 @@ async function decodeBarcodeFull(imgEl){
 }
 
 /* ---------- Tesseract OCR (simple, robust) ---------- */
-async function runOcr(canvas){
+async function runOcr(srcCanvas){
   if(typeof Tesseract==='undefined'){diag("Tesseract not loaded.");return [];}
   try{
-    // upscale small crops so text is legible for Tesseract
+    // Try OpenCV preprocessing first for better OCR quality
+    let pp=cvPreprocess(srcCanvas);
+    if(pp&&pp.width&&pp.height){
+      diag("OpenCV preprocessing applied: "+pp.width+"x"+pp.height);
+    }
+    // Upscale for OCR: ensure min dimension >= 1000px
     const MIN=1000;
-    let src=canvas;
-    if(Math.min(canvas.width,canvas.height)<MIN){
-      const s=MIN/Math.min(canvas.width,canvas.height);
-      const up=document.createElement("canvas");
-      up.width=Math.round(canvas.width*s);up.height=Math.round(canvas.height*s);
-      up.getContext("2d").drawImage(canvas,0,0,up.width,up.height);
+    let src=pp||srcCanvas;
+    if(Math.min(src.width,src.height)<MIN){
+      const s=MIN/Math.min(src.width,src.height);
+      const up=document.createElement('canvas');
+      up.width=Math.round(src.width*s);up.height=Math.round(src.height*s);
+      up.getContext('2d').drawImage(src,0,0,up.width,up.height);
       src=up;
     }
-    const {data}=await Tesseract.recognize(src,'eng',{});
+    // Use PSM 6 (uniform block) for better field extraction
+    const {data}=await Tesseract.recognize(src,'eng',{
+      parameters: { tessedit_pageseg_mode: '6' }
+    });
     diag("OCR text[0..200]: "+(data.text||'').replace(/\s+/g,' ').slice(0,200));
     return (data.words||[]).map(word=>({
       text:word.text,
