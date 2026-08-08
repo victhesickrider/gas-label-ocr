@@ -245,10 +245,17 @@ async function runDecode(canvas,label){
     for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }catch(e){diag("Barcode layer error: "+e.message);}
   if(!Object.keys(fields).length)diag("No GS1 from barcode; OCR will catch (AI) text.");
-  // Layer 2: OCR on contrast-enhanced canvas (keeps text readable, better than raw)
+  // Layer 2: OCR on contrast-enhanced canvas (downscaled for Tesseract reliability)
   const pp=cvPreprocess(canvas);
   const ocrInput=pp||canvas;
-  const words=await runOcr(ocrInput);
+  // downscale huge label photos for browser Tesseract reliability
+  const MAX=1200;
+  const scale=Math.min(1,MAX/Math.max(ocrInput.width,ocrInput.height));
+  const tC=document.createElement("canvas");
+  tC.width=Math.max(1,Math.round(ocrInput.width*scale));
+  tC.height=Math.max(1,Math.round(ocrInput.height*scale));
+  tC.getContext("2d").drawImage(ocrInput,0,0,tC.width,tC.height);
+  const words=await runOcr(tC);
   diag("OCR: "+words.length+" words");
   const ocrFields=extractFromWords(words);
   for(const k in ocrFields)if(!fields[k])fields[k]=ocrFields[k];
