@@ -148,24 +148,33 @@ async function decodeBarcode(canvas,imgEl){
   }
 }
 
-/* Fallback: sweep the full image in horizontal + vertical strips to find barcodes
-   when no 4-tap crop was made (raw full photo). */
-async function decodeBarcodeFull(imgEl){
+/* Full-image sweep: try horizontal + vertical strips to localize barcodes */
+async function sweepFullImage(imgEl){
   const w=imgEl.naturalWidth||imgEl.width, h=imgEl.naturalHeight||imgEl.height;
   const strips=[];
-  // horizontal bands (top 20%, mid 20%, bottom 20%)
-  for(const [yf,hh] of [[0,0.22],[0.4,0.2],[0.78,0.22]]){
+  // horizontal bands
+  for(const [yf,hh] of [[0,0.2],[0.4,0.2],[0.8,0.2]]){
     strips.push({x:0,y:Math.round(h*yf),width:w,height:Math.round(h*hh)});
+  }
+  // vertical bands (right side often has barcodes)
+  for(const [xf,ww] of [[0.7,0.3],[0,0.3]]){
+    strips.push({x:Math.round(w*xf),y:0,width:Math.round(w*ww),height:h});
   }
   const out=[];
   for(const s of strips){
     const c=document.createElement("canvas");
     c.width=s.width;c.height=s.height;
     c.getContext("2d").drawImage(imgEl,s.x,s.y,s.width,s.height,0,0,s.width,s.height);
-    const found=await decodeBarcode(c);
+    const found=await decodeBarcode(c,null);
     out.push(...found);
   }
   return out;
+}
+
+/* Fallback: sweep the full image in horizontal + vertical strips to find barcodes
+   when no 4-tap crop was made (raw full photo). */
+async function decodeBarcodeFull(imgEl){
+  return sweepFullImage(imgEl);
 }
 
 /* ---------- Tesseract OCR (simple, robust) ---------- */
@@ -284,8 +293,13 @@ async function runDecode(canvas,label){
   const fields={};
   // Layer 1: barcode on the 4-tap warp (prefer decoding from the <img> element)
   try{
-    const codes=await decodeBarcode(canvas,imgEl);
-    diag("Barcode: "+codes.length+" found");
+    let codes=await decodeBarcode(canvas,imgEl);
+    diag("Barcode (crop): "+codes.length+" found");
+    if(!codes.length){
+      diag("No barcode from crop; trying full-image sweep…");
+      codes=await sweepFullImage(imgEl);
+      diag("Barcode (sweep): "+codes.length+" found");
+    }
     for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }catch(e){diag("Barcode layer error: "+e.message);}
   if(!Object.keys(fields).length){
