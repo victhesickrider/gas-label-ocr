@@ -282,13 +282,15 @@ async function runDecode(canvas,label){
   busy(true);
   const t0=now();
   const fields={};
-  // Layer 1: barcode on the 4-tap warp (user-cropped label)
+  // Layer 1: barcode on the 4-tap warp (prefer decoding from the <img> element)
   try{
     const codes=await decodeBarcode(canvas,imgEl);
-    diag("Sweep found: "+sweep.length+" barcodes");
-    for(const c of sweep){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
+    diag("Barcode: "+codes.length+" found");
+    for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
+  }catch(e){diag("Barcode layer error: "+e.message);}
+  if(!Object.keys(fields).length){
+    diag("No GS1 from barcode; OCR will catch (AI) text.");
   }
-  if(!Object.keys(fields).length)diag("No GS1 from barcode; OCR will catch (AI) text.");
   // Layer 2: OCR on the same warp (canvas) — runOcr handles upscaling internally
   const words=await runOcr(canvas);
   diag("OCR: "+words.length+" words");
