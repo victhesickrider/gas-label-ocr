@@ -202,17 +202,17 @@ async function runOcr(canvas){
 
 /* ---------- field anchor extraction (no LLM) ---------- */
 const FIELD_ANCHORS={
-  sscc:["sscc","serial shipping container","serial number","serial no","ssc"],
-  gtin:["gtin","global trade item","barcode","content gtin","content(gtin)"],
-  batch:["batch","batch/lot","batch no","batch number","lot","lot no","lot number"],
-  bestBefore:["best before","bestbefore","expiry","expiry date","best before date"],
-  prodDate:["production date","prod date","pack date","gr date","grdate","packing date"],
-  quantity:["quantity","qty","count","amount","content","net weight","nets"],
-  sku:["common item code","item code","material","material no","material number","product code","product id","article number","sku","common"],
+  sscc:["sscc","sscc-18","serial shipping container","serial number","serial no","ssc","sscc nr","sscc:"],
+  gtin:["gtin","global trade item","content","content gtin","content(gtin)","content:"],
+  batch:["batch","batch/lot","batch no","batch number","batch no.","lot","lot no","lot number","batch/lot:"],
+  bestBefore:["best before","bestbefore","expiry","expiry date","best before date","best before (ddmmyy)","best before (dd.mm.yy)"],
+  prodDate:["production date","prod date","prod date:","pack date","gr date","grdate","grd8","packing date","goods receipt","gr date:"],
+  quantity:["quantity","qty","count","amount","nets"],
+  product:["product description","description","material description","article","wip","material/description","product desc"],
+  sku:["common item code","item code","material","material no","material number","product code","product id","article number","sku","common","product"],
   variant:["variant"],
-  product:["product","product description","description","material description","article","wip"],
   customerCode:["customer code","customer","cust code","cust"],
-  grossWeight:["gross weight","gross weight kg","weight","wt","gross weight (kg)"]
+  grossWeight:["gross weight","gross weight kg","netweight","net weight","weight","wt","gross weight (kg)","netweight (kg)"]
 };
 function normStr(s){return(s||"").toLowerCase().replace(/[^a-z0-9]/g,"").replace(/\s+/g,"");}
 function cleanField(f,raw){
@@ -233,7 +233,7 @@ function extractFromWords(words){
       if(out[field])continue;
       for(const anchor of FIELD_ANCHORS[field]){
         const an=normStr(anchor);
-        const hits=withCoord.filter(w=>normStr(w.text)===an);
+        const hits=withCoord.filter(w=>{const wn=normStr(w.text);return wn===an||(an.length>=6&&wn.includes(an));});
         if(!hits.length)continue;
         const acx=(Math.min(...hits.map(w=>w.x0))+Math.max(...hits.map(w=>w.x1)))/2;
         const acy=(Math.min(...hits.map(w=>w.y0))+Math.max(...hits.map(w=>w.y1)))/2;
@@ -292,6 +292,30 @@ function extractFromWords(words){
         else if(/best\s*before|expiry|exp/.test(ctx))fld='bestBefore';
         out[fld]=nd;
       }
+    }
+  }
+  // Date fallback: find date strings and route by nearby label text
+  if(!out.bestBefore&&!out.prodDate){
+    for(const w of words){
+      const m=w.text.match(/(\d{2}[./\-]\d{2}[./\-]\d{2,4})/);
+      if(m){
+        const nd=normDate(m[1]);
+        if(!nd)continue;
+        const ctx=(w.text||'').toLowerCase();
+        let fld='bestBefore';
+        if(/prod\s*date|pack\s*date|gr\s*date|production/.test(ctx))fld='prodDate';
+        else if(/best\s*before|expiry|exp/.test(ctx))fld='bestBefore';
+        out[fld]=nd;
+      }
+    }
+  }
+  // Parse any GS1 AI strings found in OCR text (e.g., "(00)150002452001459712 (02)05010049310218")
+  const fullText = words.map(w=>w.text).join(' ');
+  const gs1Segments = fullText.match(/\(\d{2,4}\)[\d\s\(\)]+/g);
+  if(gs1Segments){
+    for(const seg of gs1Segments){
+      const parsed=parseGs1(seg);
+      for(const k in parsed)if(!out[k])out[k]=parsed[k];
     }
   }
   for(const w of words){
