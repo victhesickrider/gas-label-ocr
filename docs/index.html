@@ -204,12 +204,12 @@ async function runOcr(canvas){
 const FIELD_ANCHORS={
   sscc:["sscc","sscc-18","serial shipping container","serial number","serial no","ssc","sscc nr","sscc:"],
   gtin:["gtin","global trade item","content","content gtin","content(gtin)","content:"],
-  batch:["batch","batch/lot","batch no","batch number","batch no.","lot","lot no","lot number","batch/lot:"],
+  batch:["batch no","batch number","batch/lot","lot no","lot number"],
   bestBefore:["best before","bestbefore","expiry","expiry date","best before date","best before (ddmmyy)","best before (dd.mm.yy)"],
   prodDate:["production date","prod date","prod date:","pack date","gr date","grdate","grd8","packing date","goods receipt","gr date:"],
   quantity:["quantity","qty","count","amount","nets"],
-  product:["product description","description","material description","article","wip","material/description","product desc"],
-  sku:["common item code","item code","material","material no","material number","product code","product id","article number","sku","common","product"],
+  product:["product description","material description","material/description","product desc"],
+  sku:["common item code","item code","material no","material number","article number","sku"],
   variant:["variant"],
   customerCode:["customer code","customer","cust code","cust"],
   grossWeight:["gross weight","gross weight kg","netweight","net weight","weight","wt","gross weight (kg)","netweight (kg)"]
@@ -231,69 +231,126 @@ function extractFromWords(words){
   if(withCoord.length){
     for(const field in FIELD_ANCHORS){
       if(out[field])continue;
+      
+      // Try each anchor for this field
       for(const anchor of FIELD_ANCHORS[field]){
         const an=normStr(anchor);
-        const hits=withCoord.filter(w=>{const wn=normStr(w.text);return wn===an||(an.length>=6&&wn.includes(an));});
-        if(!hits.length)continue;
-        const acx=(Math.min(...hits.map(w=>w.x0))+Math.max(...hits.map(w=>w.x1)))/2;
-        const acy=(Math.min(...hits.map(w=>w.y0))+Math.max(...hits.map(w=>w.y1)))/2;
-        const rowH=Math.max(Math.max(...hits.map(w=>w.y1))-Math.min(...hits.map(w=>w.y0)),22);
-        let best=null,bestD=1e9;
-        for(const w of withCoord){
-          if(normStr(w.text)===an)continue;
-          const wx=(w.x0+w.x1)/2,wy=(w.y0+w.y1)/2;
-          if(Math.abs(wy-acy)>rowH*1.6&&wy<=acy)continue;
-          const dd=Math.hypot(wx-acx,wy-acy);
-          if(dd<bestD){bestD=dd;best=w;}
+        const anWords=an.split(/(?=[a-z])(?<=[0-9])|(?=[0-9])(?<=[a-z])/).filter(w=>w.length>1); // Split alphanumeric boundaries
+        
+        // Find word sequences that could form this anchor
+        let bestMatch=null;
+        let bestScore=0;
+        
+        for(let i=0;i<withCoord.length;i++){
+          let score=0;
+          let matchedWords=0;
+          let totalAnchorChars=0;
+          
+          // Check if we can match anchor words starting at position i
+          for(let aw=0;aw<anWords.length && i+aw<withCoord.length;aw++){
+            const wnorm=normStr(withCoord[i+aw].text);
+            const target=anWords[aw];
+            
+            // Exact match or contains (for stretched matches)
+            if(wnorm===target || (target.length>=4 && wnorm.includes(target))){
+              score+=target.length;
+              matchedWords++;
+              totalAnchorChars+=target.length;
+            }else{
+              break;
+            }
+          }
+          
+          // Require at least 60% of anchor matched
+          if(matchedWords>0 && score/totalAnchorChars>=0.6){
+            if(score>bestScore){
+              bestScore=score;
+              bestMatch={start:i, end:i+matchedWords-1, score};
+            }
+          }
         }
-        if(best&&best.text.trim().length>=1){
-          // Build a candidate by concatenating consecutive numeric/alphanumeric tokens on the same line
-          const lineWords = withCoord.filter(w=>Math.abs(w.y0 - acy) <= rowH*1.6 && Math.abs(w.y1 - acy) <= rowH*1.6);
+        
+        if(bestMatch){
+          // Extract value from words after the anchor match
+          const anchorEndIdx=bestMatch.end+1;
+          const lineY=(withCoord[bestMatch.start].y0+withCoord[bestMatch.start].y1)/2;
+          const rowH=20; // Approximate row height
+          
+          // Get words on same line (within vertical tolerance)
+          const lineWords=withCoord.filter(w=>Math.abs((w.y0+w.y1)/2-lineY)<=rowH*1.5);
           lineWords.sort((a,b)=>a.x0-b.x0);
-          // For sscc and gtin, we expect a run of digits; for product, grab the whole line
-          let cand = '';
-          if(field==='sscc'||field==='gtin'){
-            // collect consecutive digits
-            for(const w of lineWords){
-              if(/^\d+$/.test(w.text)){
-                cand += w.text;
-              }else if(cand.length>0){
-                // stop at first non-digit after we started
-                break;
+          
+          // Find position of anchor in lineWords
+          let anchorPosInLine=-1;
+          for(let i=0;i<lineWords.length;i++){
+            if(i>=bestMatch.start && i<=bestMatch.end){
+              anchorPosInLine=i;
+              break;
+            }
+          }
+          
+          if(anchorPosInLine>=0){
+            let cand='';
+            // For sscc/gtin, take consecutive digits
+            if(field==='sscc'||field==='gtin'){
+              for(let i=anchorPosInLine+1;i<lineWords.length;i++){
+                if(/^\d+$/.test(lineWords[i].text)){
+                  cand+=lineWords[i].text;
+                }else if(cand.length>0){
+                  break; // Stop at first non-digit after digits started
+                }
+              }
+            }else if(field==='product'){
+              // Take text to the right until we hit another likely anchor or end
+              const skipAnchors=new Set(['batch','lot','gtin','sscc','best before','expiry','prod date','common item','sku']);
+              for(let i=anchorPosInLine+1;i<lineWords.length;i++){
+                const wnorm=normStr(lineWords[i].text);
+                let isSkip=false;
+                for(const skip of skipAnchors){
+                  if(wnorm.includes(skip)||skip.includes(wnorm)){
+                    isSkip=true;
+                    break;
+                  }
+                }
+                if(isSkip)break;
+                cand+=(cand?' ':'')+lineWords[i].text;
+              }
+            }else if(field==='sku'){
+              // Similar to product but stop at common anchor words
+              const stopWords=new Set(['description','batch','lot','weight','date','count','serial']);
+              for(let i=anchorPosInLine+1;i<lineWords.length;i++){
+                const wnorm=normStr(lineWords[i].text);
+                let shouldStop=false;
+                for(const stop of stopWords){
+                  if(wnorm.includes(stop)||stop.includes(wnorm)){
+                    shouldStop=true;
+                    break;
+                  }
+                }
+                if(shouldStop)break;
+                cand+=(cand?' ':'')+lineWords[i].text;
+              }
+            }else{
+              // For other fields, take the next meaningful word
+              for(let i=anchorPosInLine+1;i<lineWords.length;i++){
+                if(lineWords[i].text.trim().length>0){
+                  cand=lineWords[i].text;
+                  break;
+                }
               }
             }
-          }else if(field==='product'){
-            // grab all words on the same line to the right of the anchor
-            for(const w of lineWords){
-              if((w.x0+w.x1)/2 < acx) continue; // skip anchor itself + anything left
-              cand += (cand?' ':'') + w.text;
+            
+            const c=cleanField(field,cand);
+            if(c){
+              out[field]=c;
+              break; // Found value for this field, move to next field
             }
-          }else{
-            // for other fields, just take the best word's text
-            cand = best.text;
           }
-          const c = cleanField(field,cand);
-          if(c)out[field]=c;
         }
-        break;
       }
     }
   }
-  if(!out.bestBefore&&!out.prodDate){
-    for(const w of words){
-      const m=w.text.match(/(\d{2}[./\-]\d{2}[./\-]\d{2,4})/);
-      if(m){
-        const nd=normDate(m[1]);
-        if(!nd)continue;
-        // route to explicit field by nearby label, else default bestBefore
-        const ctx=(w.text||'').toLowerCase();
-        let fld='bestBefore';
-        if(/prod\s*date|pack\s*date|gr\s*date|production/.test(ctx))fld='prodDate';
-        else if(/best\s*before|expiry|exp/.test(ctx))fld='bestBefore';
-        out[fld]=nd;
-      }
-    }
-  }
+  
   // Date fallback: find date strings and route by nearby label text
   if(!out.bestBefore&&!out.prodDate){
     for(const w of words){
@@ -309,6 +366,7 @@ function extractFromWords(words){
       }
     }
   }
+  
   // Parse any GS1 AI strings found in OCR text (e.g., "(00)150002452001459712 (02)05010049310218")
   const fullText = words.map(w=>w.text).join(' ');
   const gs1Segments = fullText.match(/\(\d{2,4}\)[\d\s\(\)]+/g);
@@ -318,11 +376,14 @@ function extractFromWords(words){
       for(const k in parsed)if(!out[k])out[k]=parsed[k];
     }
   }
+  
+  // Final fallback: extract SSCC/GTIN from digit strings
   for(const w of words){
     const tok=w.text.replace(/\D/g,"");
     if(tok.length>=17&&!out.sscc)out.sscc=tok.slice(0,18);
     else if(tok.length===14&&!out.gtin)out.gtin=tok;
   }
+  
   return out;
 }
 
@@ -342,6 +403,7 @@ async function runDecode(canvas,label){
     }
     for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }catch(e){diag("Barcode layer error: "+e.message);}
+
   if(!Object.keys(fields).length){
     diag("No GS1 from barcode; OCR will catch (AI) text.");
   }
