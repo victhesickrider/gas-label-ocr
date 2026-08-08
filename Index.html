@@ -131,17 +131,23 @@ async function decodeBarcode(canvas,imgEl){
   if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
   try{
     if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
-    // Prefer decoding from the <img> element directly (more reliable than canvas)
-    if(imgEl && imgEl.naturalWidth){
-      try{
-        const res=await zxReader.decodeFromImage(imgEl);
-        if(res)return [res.getText()];
-      }catch(_){}
-    }
-    const results=await zxReader.decodeFromCanvas(canvas);
-    if(!results)return [];
-    const txt=Array.isArray(results)?results.map(r=>r.getText?r.getText():String(r)):[results.getText?results.getText():String(results)];
-    return txt.filter(Boolean);
+    // v0.21.3 UMD API: decodeBitmap(BinaryBitmap)
+    const src=imgEl||canvas;
+    const w=src.naturalWidth||src.width, h=src.naturalHeight||src.height;
+    const tc=document.createElement('canvas');tc.width=w;tc.height=h;
+    const ctx=tc.getContext('2d');
+    ctx.drawImage(src,0,0,w,h);
+    const imgData=ctx.getImageData(0,0,w,h);
+    // Build RGBA byte array
+    const rgba=new Uint8ClampedArray(imgData.data.length);
+    for(let i=0;i<imgData.data.length;i++)rgba[i]=imgData.data[i];
+    const lum=new ZXing.RGBLuminanceSource(rgba,w,h);
+    const bin=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+    try{
+      const res=zxReader.decodeBitmap(bin);
+      if(res)return [res.getText()];
+    }catch(_){}
+    return [];
   }catch(e){
     diag("ZXing: no barcode found in this crop.");
     return [];
