@@ -210,11 +210,11 @@ const FIELD_ANCHORS={
   quantity:["quantity","qty","count","amount","content","net weight","nets"],
   sku:["common item code","item code","material","material no","material number","product code","product id","article number","sku","common"],
   variant:["variant"],
-  product:["product","product description","description","material description","article"],
+  product:["product","product description","description","material description","article","wip"],
   customerCode:["customer code","customer","cust code","cust"],
-  grossWeight:["gross weight","gross weight (kg)","weight","wt"]
+  grossWeight:["gross weight","gross weight kg","weight","wt","gross weight (kg)"]
 };
-function normStr(s){return(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");}
+function normStr(s){return(s||"").toLowerCase().replace(/[^a-z0-9]/g,"").replace(/\s+/g,"");}
 function cleanField(f,raw){
   if(!raw)return"";
   let v=raw.replace(/ /g," ").trim();
@@ -222,6 +222,7 @@ function cleanField(f,raw){
   if(f==="quantity"||f==="grossWeight"){const m=v.match(/(\d+(?:\.\d+)?)/);return m?m[1]:"";}
   if(f==="sscc"){const t=v.replace(/\D/g,"");return t.length>=17?t.slice(0,18):"";}
   if(f==="gtin"){const t=v.replace(/\D/g,"");return t.length===14?t:"";}
+  if(f==="product"){return v.replace(/\s+/g," ").trim();}
   return v.replace(/\s+/g,"").replace(/-/g,"");
 }
 function extractFromWords(words){
@@ -249,7 +250,7 @@ function extractFromWords(words){
           // Build a candidate by concatenating consecutive numeric/alphanumeric tokens on the same line
           const lineWords = withCoord.filter(w=>Math.abs(w.y0 - acy) <= rowH*1.6 && Math.abs(w.y1 - acy) <= rowH*1.6);
           lineWords.sort((a,b)=>a.x0-b.x0);
-          // For sscc and gtin, we expect a run of digits
+          // For sscc and gtin, we expect a run of digits; for product, grab the whole line
           let cand = '';
           if(field==='sscc'||field==='gtin'){
             // collect consecutive digits
@@ -260,6 +261,12 @@ function extractFromWords(words){
                 // stop at first non-digit after we started
                 break;
               }
+            }
+          }else if(field==='product'){
+            // grab all words on the same line to the right of the anchor
+            for(const w of lineWords){
+              if((w.x0+w.x1)/2 < acx) continue; // skip anchor itself + anything left
+              cand += (cand?' ':'') + w.text;
             }
           }else{
             // for other fields, just take the best word's text
@@ -275,7 +282,16 @@ function extractFromWords(words){
   if(!out.bestBefore&&!out.prodDate){
     for(const w of words){
       const m=w.text.match(/(\d{2}[./\-]\d{2}[./\-]\d{2,4})/);
-      if(m){const nd=normDate(m[1]);if(nd)out[/(best|expiry)/i.test(w.text)?"bestBefore":"prodDate"]=nd;}
+      if(m){
+        const nd=normDate(m[1]);
+        if(!nd)continue;
+        // route to explicit field by nearby label, else default bestBefore
+        const ctx=(w.text||'').toLowerCase();
+        let fld='bestBefore';
+        if(/prod\s*date|pack\s*date|gr\s*date|production/.test(ctx))fld='prodDate';
+        else if(/best\s*before|expiry|exp/.test(ctx))fld='bestBefore';
+        out[fld]=nd;
+      }
     }
   }
   for(const w of words){
