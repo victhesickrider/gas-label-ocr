@@ -234,11 +234,11 @@ function cleanField(f,raw){
 function extractFromWords(words){
   const out={};
   
-  // Build full cleaned OCR text for GS1 AI parsing and field extraction
+  // Build full cleaned OCR text
   const rawText=words.map(w=>w.text).join(' ');
   const cleanText=rawText.replace(/[^\x20-\x7E]/g,' ').replace(/\s+/g,' ');
   
-  // 1. Parse GS1 AI strings from full text first (most reliable)
+  // 1. Parse GS1 AI strings from full text (most reliable for barcode data)
   const gs1Matches=cleanText.match(/\(\d{2,4}\)[^\s\(\)]*/g);
   if(gs1Matches){
     for(const m of gs1Matches){
@@ -247,14 +247,60 @@ function extractFromWords(words){
     }
   }
   
-  // 2. Parse bare SSCC/GTIN from digit strings
+  // 2. Parse bare SSCC/GTIN from digit strings (fallback)
   for(const w of words){
     const tok=w.text.replace(/\D/g,"");
     if(tok.length>=17&&!out.sscc)out.sscc=tok.slice(0,18);
     else if(tok.length===14&&!out.gtin)out.gtin=tok;
   }
   
-  // 3. Extract dates with context
+  // 3. Field-specific patterns on cleaned text
+  const PATTERNS={
+    sscc:[/sscc\s*-?\s*18\s*[:\s]*/i,/sscc\s*nr\s*[:\s]*/i,/serial\s+shipping\s+container\s*[:\s]*/i],
+    gtin:[/gtin\s*[:\s]*/i,/global\s+trade\s+item\s*[:\s]*/i,/content\s*[:\s]*/i,/content\s*\(gtin\)\s*[:\s]*/i],
+    batch:[/batch\s*no\.?\s*[:\s]*/i,/batch\s+number\s*[:\s]*/i,/batch\/lot\s*[:\s]*/i,/lot\s*no\.?\s*[:\s]*/i],
+    bestBefore:[/best\s*before\s*[:\s]*/i,/expiry\s*date\s*[:\s]*/i,/best\s+before\s+date\s*[:\s]*/i],
+    prodDate:[/production\s*date\s*[:\s]*/i,/prod\s*date\s*[:\s]*/i,/gr\s*date\s*[:\s]*/i,/pack\s*date\s*[:\s]*/i],
+    quantity:[/quantity\s*[:\s]*/i,/qty\s*[:\s]*/i,/count\s*[:\s]*/i],
+    product:[/product\s+description\s*[:\s]*/i,/material\s+description\s*[:\s]*/i],
+    sku:[/common\s+item\s+code\s*[:\s]*/i,/item\s+code\s*[:\s]*/i],
+    variant:[/variant\s*[:\s]*/i],
+    customerCode:[/customer\s*code\s*[:\s]*/i],
+    grossWeight:[/gross\s*weight\s*[:\s]*/i,/net\s*weight\s*[:\s]*/i,/weight\s*\(\s*kg\s*\)\s*[:\s]*/i]
+  };
+  
+  for(const field in PATTERNS){
+    if(out[field])continue;
+    const patterns=PATTERNS[field];
+    for(const pat of patterns){
+      const match=cleanText.search(pat);
+      if(match>=0){
+        // Extract text after the match
+        const after=cleanText.substring(match+pat.source.length);
+        // Take next up to 30 chars, then clean based on field
+        let cand=after.trim().substring(0,30);
+        // For sscc/gtin, take only digits
+        if(field==='sscc'||field==='gtin'){
+          const digits=cand.replace(/\D/g,'');
+          if(field==='sscc'&&digits.length>=17)out[field]=digits.slice(0,18);
+          else if(field==='gtin'&&digits.length===14)out[field]=digits;
+        }else if(field==='bestBefore'||field==='prodDate'){
+          const nd=normDate(cand);
+          if(nd)out[field]=nd;
+        }else if(field==='quantity'){
+          const m=cand.match(/^(\d+(?:\.\d+)?)/);
+          if(m)out[field]=m[1];
+        }else{
+          // Take first word or until separator
+          const val=cand.split(/[\s,:;-]+/)[0];
+          if(val)out[field]=val;
+        }
+        if(out[field])break;
+      }
+    }
+  }
+  
+  // 4. Date fallback: find any date-like strings and route by context
   if(!out.bestBefore&&!out.prodDate){
     const dateMatches=cleanText.match(/\d{2}[./\-]\d{2}[./\-]\d{2,4}|\d{6}/g);
     for(const dm of dateMatches){
@@ -265,51 +311,6 @@ function extractFromWords(words){
       if(/prod\s*date|pack\s*date|gr\s*date|production/.test(ctx))fld='prodDate';
       else if(/best\s*before|expiry|exp/.test(ctx))fld='bestBefore';
       out[fld]=nd;
-    }
-  }
-  
-  // 4. Field-specific extraction using cleaned text and known labels
-  const FIELD_LABELS={
-    sscc:['sscc','sscc-18','serial shipping container'],
-    gtin:['gtin','global trade item','content'],
-    batch:['batch no','batch number','batch/lot'],
-    bestBefore:['best before','bestbefore','expiry date'],
-    prodDate:['production date','prod date','gr date','pack date'],
-    quantity:['quantity','qty','count'],
-    product:['product description','material description'],
-    sku:['common item code','item code'],
-    variant:['variant'],
-    customerCode:['customer code'],
-    grossWeight:['gross weight','net weight']
-  };
-  
-  for(const field in FIELD_LABELS){
-    if(out[field])continue;
-    const labels=FIELD_LABELS[field];
-    for(const label of labels){
-      const idx=cleanText.toLowerCase().indexOf(label.toLowerCase());
-      if(idx>=0){
-        // Extract text after the label
-        const after=cleanText.substring(idx+label.length);
-        // Take next 20-30 chars as candidate value
-        let cand=after.trim().substring(0,25);
-        // Clean based on field type
-        const cleaned=cleanField(field,cand);
-        if(cleaned){
-          out[field]=cleaned;
-          break;
-        }
-      }
-    }
-  }
-  
-  // 5. Fallback: look for any 14-18 digit strings not yet captured
-  for(const w of words){
-    const tok=w.text.replace(/\D/g,"");
-    if(tok.length>=17&&!out.sscc){
-      out.sscc=tok.slice(0,18);
-    }else if(tok.length===14&&!out.gtin){
-      out.gtin=tok;
     }
   }
   
