@@ -158,6 +158,7 @@ async function runOcr(canvas){
   try{
     const w=await ensureTesseract();
     const {data}=await w.recognize(canvas);
+    diag("OCR text[0..200]: "+(data.text||'').replace(/\s+/g,' ').slice(0,200));
     return (data.words||[]).map(word=>({
       text:word.text,
       x0:word.bbox.x0,y0:word.bbox.y0,x1:word.bbox.x1,y1:word.bbox.y1
