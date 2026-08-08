@@ -301,7 +301,7 @@ function extractFromWords(words){
   
   // 4. Date fallback: find any date-like strings and route by context
   if(!out.bestBefore&&!out.prodDate){
-    const dateMatches=cleanText.match(/\d{2}[./\-]\d{2}[./\-]\d{2,4}|\d{6}/g);
+    const dateMatches=cleanText.match(/\d{2}[./\-]\d{2}[./\-]\d{2,4}|\d{6}/g)||[];
     for(const dm of dateMatches){
       const nd=normDate(dm);
       if(!nd)continue;
