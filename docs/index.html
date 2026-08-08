@@ -125,7 +125,7 @@ function cvPreprocess(inImg){
   }catch(e){diag("OpenCV preprocess error: "+e.message);return null;}
 }
 
-/* ---------- ZXing barcode decode ---------- */
+/* ---------- ZXing barcode decode (crop-first) ---------- */
 let zxReader=null;
 async function decodeBarcode(canvas){
   if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
@@ -136,28 +136,46 @@ async function decodeBarcode(canvas){
     const txt=Array.isArray(results)?results.map(r=>r.getText?r.getText():String(r)):[results.getText?results.getText():String(results)];
     return txt.filter(Boolean);
   }catch(e){
-    // try multiple if single failed
-    try{
-      const multi=await zxReader.decodeFromCanvas(canvas);
-      if(multi)return [multi.getText?multi.getText():String(multi)];
-    }catch(_){}
-    diag("ZXing: no barcode found in image.");
+    diag("ZXing: no barcode found in this crop.");
     return [];
   }
 }
 
-/* ---------- Tesseract OCR ---------- */
-let tessWorker=null;
-async function ensureTesseract(){
-  if(tessWorker)return tessWorker;
-  if(typeof Tesseract==='undefined')throw new Error('Tesseract not loaded');
-  tessWorker=await Tesseract.createWorker('eng');
-  return tessWorker;
+/* Fallback: sweep the full image in horizontal + vertical strips to find barcodes
+   when no 4-tap crop was made (raw full photo). */
+async function decodeBarcodeFull(imgEl){
+  const w=imgEl.naturalWidth||imgEl.width, h=imgEl.naturalHeight||imgEl.height;
+  const strips=[];
+  // horizontal bands (top 20%, mid 20%, bottom 20%)
+  for(const [yf,hh] of [[0,0.22],[0.4,0.2],[0.78,0.22]]){
+    strips.push({x:0,y:Math.round(h*yf),width:w,height:Math.round(h*hh)});
+  }
+  const out=[];
+  for(const s of strips){
+    const c=document.createElement("canvas");
+    c.width=s.width;c.height=s.height;
+    c.getContext("2d").drawImage(imgEl,s.x,s.y,s.width,s.height,0,0,s.width,s.height);
+    const found=await decodeBarcode(c);
+    out.push(...found);
+  }
+  return out;
 }
+
+/* ---------- Tesseract OCR (simple, robust) ---------- */
 async function runOcr(canvas){
+  if(typeof Tesseract==='undefined'){diag("Tesseract not loaded.");return [];}
   try{
-    const w=await ensureTesseract();
-    const {data}=await w.recognize(canvas);
+    // upscale small crops so text is legible for Tesseract
+    const MIN=1000;
+    let src=canvas;
+    if(Math.min(canvas.width,canvas.height)<MIN){
+      const s=MIN/Math.min(canvas.width,canvas.height);
+      const up=document.createElement("canvas");
+      up.width=Math.round(canvas.width*s);up.height=Math.round(canvas.height*s);
+      up.getContext("2d").drawImage(canvas,0,0,up.width,up.height);
+      src=up;
+    }
+    const {data}=await Tesseract.recognize(src,'eng',{});
     diag("OCR text[0..200]: "+(data.text||'').replace(/\s+/g,' ').slice(0,200));
     return (data.words||[]).map(word=>({
       text:word.text,
@@ -238,24 +256,22 @@ async function runDecode(canvas,label){
   busy(true);
   const t0=now();
   const fields={};
-  // Layer 1: barcode on original warp (OpenCV preprocessing destroys barcode contrast)
+  // Layer 1: barcode on the 4-tap warp (user-cropped label)
   try{
     const codes=await decodeBarcode(canvas);
     diag("Barcode: "+codes.length+" found");
     for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }catch(e){diag("Barcode layer error: "+e.message);}
+  if(!Object.keys(fields).length){
+    // Fallback: sweep full image in strips for barcodes (no 4-tap crop made)
+    diag("No barcode from 4-tap crop; trying full-image sweep…");
+    const sweep=await decodeBarcodeFull(imgEl);
+    diag("Sweep found: "+sweep.length+" barcodes");
+    for(const c of sweep){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
+  }
   if(!Object.keys(fields).length)diag("No GS1 from barcode; OCR will catch (AI) text.");
-  // Layer 2: OCR on contrast-enhanced canvas (downscaled for Tesseract reliability)
-  const pp=cvPreprocess(canvas);
-  const ocrInput=pp||canvas;
-  // downscale huge label photos for browser Tesseract reliability
-  const MAX=1200;
-  const scale=Math.min(1,MAX/Math.max(ocrInput.width,ocrInput.height));
-  const tC=document.createElement("canvas");
-  tC.width=Math.max(1,Math.round(ocrInput.width*scale));
-  tC.height=Math.max(1,Math.round(ocrInput.height*scale));
-  tC.getContext("2d").drawImage(ocrInput,0,0,tC.width,tC.height);
-  const words=await runOcr(tC);
+  // Layer 2: OCR on the same warp (canvas) — runOcr handles upscaling internally
+  const words=await runOcr(canvas);
   diag("OCR: "+words.length+" words");
   const ocrFields=extractFromWords(words);
   for(const k in ocrFields)if(!fields[k])fields[k]=ocrFields[k];
