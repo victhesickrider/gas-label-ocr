@@ -77,7 +77,7 @@ progress{width:100%;height:10px}
 <div id="busy" class="hidden"><div class="spinner"></div></div>
 
 <!-- Libraries (pinned, from jsDelivr). CSP on GitHub Pages is permissive for script-src. -->
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.23.0/umd/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script src="https://docs.opencv.org/4.13.0/opencv.js"></script>
 
@@ -125,26 +125,22 @@ function cvPreprocess(inImg){
   }catch(e){diag("OpenCV preprocess error: "+e.message);return null;}
 }
 
-/* ---------- ZXing barcode decode (crop-first, img preferred) ---------- */
+/* ---------- ZXing barcode decode (0.23 API: decodeFromImageElement) ---------- */
 let zxReader=null;
+function zxHints(){
+  const BF=ZXing.BarcodeFormat;
+  const h=new Map();
+  h.set(ZXing.DecodeHintType.TRY_HARDER,true);
+  h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[BF.ITF,BF.EAN_13,BF.CODE_128,BF.CODE_39,BF.CODE_93,BF.UPC_A,BF.UPC_E]);
+  return h;
+}
 async function decodeBarcode(canvas,imgEl){
   if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
   try{
     if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
-    // v0.21.3 UMD API: decodeBitmap(BinaryBitmap)
     const src=imgEl||canvas;
-    const w=src.naturalWidth||src.width, h=src.naturalHeight||src.height;
-    const tc=document.createElement('canvas');tc.width=w;tc.height=h;
-    const ctx=tc.getContext('2d');
-    ctx.drawImage(src,0,0,w,h);
-    const imgData=ctx.getImageData(0,0,w,h);
-    // Build RGBA byte array
-    const rgba=new Uint8ClampedArray(imgData.data.length);
-    for(let i=0;i<imgData.data.length;i++)rgba[i]=imgData.data[i];
-    const lum=new ZXing.RGBLuminanceSource(rgba,w,h);
-    const bin=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
     try{
-      const res=zxReader.decodeBitmap(bin);
+      const res=await zxReader.decodeFromImageElement(src,zxHints());
       if(res)return [res.getText()];
     }catch(_){}
     return [];
