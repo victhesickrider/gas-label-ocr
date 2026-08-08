@@ -125,12 +125,19 @@ function cvPreprocess(inImg){
   }catch(e){diag("OpenCV preprocess error: "+e.message);return null;}
 }
 
-/* ---------- ZXing barcode decode (crop-first) ---------- */
+/* ---------- ZXing barcode decode (crop-first, img preferred) ---------- */
 let zxReader=null;
-async function decodeBarcode(canvas){
+async function decodeBarcode(canvas,imgEl){
   if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
   try{
     if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
+    // Prefer decoding from the <img> element directly (more reliable than canvas)
+    if(imgEl && imgEl.naturalWidth){
+      try{
+        const res=await zxReader.decodeFromImage(imgEl);
+        if(res)return [res.getText()];
+      }catch(_){}
+    }
     const results=await zxReader.decodeFromCanvas(canvas);
     if(!results)return [];
     const txt=Array.isArray(results)?results.map(r=>r.getText?r.getText():String(r)):[results.getText?results.getText():String(results)];
@@ -230,7 +237,26 @@ function extractFromWords(words){
           if(dd<bestD){bestD=dd;best=w;}
         }
         if(best&&best.text.trim().length>=1){
-          const c=cleanField(field,best.text);
+          // Build a candidate by concatenating consecutive numeric/alphanumeric tokens on the same line
+          const lineWords = withCoord.filter(w=>Math.abs(w.y0 - acy) <= rowH*1.6 && Math.abs(w.y1 - acy) <= rowH*1.6);
+          lineWords.sort((a,b)=>a.x0-b.x0);
+          // For sscc and gtin, we expect a run of digits
+          let cand = '';
+          if(field==='sscc'||field==='gtin'){
+            // collect consecutive digits
+            for(const w of lineWords){
+              if(/^\d+$/.test(w.text)){
+                cand += w.text;
+              }else if(cand.length>0){
+                // stop at first non-digit after we started
+                break;
+              }
+            }
+          }else{
+            // for other fields, just take the best word's text
+            cand = best.text;
+          }
+          const c = cleanField(field,cand);
           if(c)out[field]=c;
         }
         break;
@@ -258,14 +284,7 @@ async function runDecode(canvas,label){
   const fields={};
   // Layer 1: barcode on the 4-tap warp (user-cropped label)
   try{
-    const codes=await decodeBarcode(canvas);
-    diag("Barcode: "+codes.length+" found");
-    for(const c of codes){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
-  }catch(e){diag("Barcode layer error: "+e.message);}
-  if(!Object.keys(fields).length){
-    // Fallback: sweep full image in strips for barcodes (no 4-tap crop made)
-    diag("No barcode from 4-tap crop; trying full-image sweep…");
-    const sweep=await decodeBarcodeFull(imgEl);
+    const codes=await decodeBarcode(canvas,imgEl);
     diag("Sweep found: "+sweep.length+" barcodes");
     for(const c of sweep){const p=parseGs1(c);for(const k in p)if(!fields[k])fields[k]=p[k];diag("  • "+c+" → "+JSON.stringify(p));}
   }
