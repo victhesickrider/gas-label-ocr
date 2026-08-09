@@ -650,7 +650,7 @@ function enableFieldRegionPick(k){
   $('preview').style.cursor='crosshair';
 }
 
-imgEl.addEventListener("pointerdown",e=>{
+imgEl.addEventListener("pointerdown",async e=>{
   if(imgEl.classList.contains("hidden")||!cropModeOn){
     // Region-mapping mode or region-drag
     if(regionModeField||regionStart)handleRegionPointer(e);return;
