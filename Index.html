@@ -368,44 +368,41 @@ function extractFromWords(words){
   const PATTERNS={
     sscc:[/sscc\s*-?\s*18\s*[:\s]*/i,/sscc\s*nr\s*[:\s]*/i,/serial\s+shipping\s+container\s*[:\s]*/i],
     gtin:[/gtin\s*[:\s]*/i,/global\s+trade\s+item\s*[:\s]*/i,/content\s*[:\s]*/i,/content\s*\(gtin\)\s*[:\s]*/i],
-    batch:[/batch\s*no\.?\s*[:\s]*/i,/batch\s+number\s*[:\s]*/i,/batch\/lot\s*[:\s]*/i,/lot\s*no\.?\s*[:\s]*/i],
+    batch:[/batch\s*no\.?\s*[:\s]*/i,/batch\s+number\s*[:\s]*/i,/batch\/lot\s*[:\s]*/i,/lot\s*no\.?\s*[:\s]*/i,/\blot\s*[:\s]*/i],
     bestBefore:[/best\s*before\s*[:\s]*/i,/expiry\s*date\s*[:\s]*/i,/best\s+before\s+date\s*[:\s]*/i],
     prodDate:[/production\s*date\s*[:\s]*/i,/prod\s*date\s*[:\s]*/i,/gr\s*date\s*[:\s]*/i,/pack\s*date\s*[:\s]*/i],
-    quantity:[/quantity\s*[:\s]*/i,/qty\s*[:\s]*/i,/count\s*[:\s]*/i],
-    product:[/product\s+(?:description|desc)[:\s]*/i,/material\s+description[:\s]*/i,/contents?[:\s]*/i],
-    sku:[/common\s+item\s+code[:\s]*/i,/item\s+code[:\s]*/i,/product\s*code[:\s]*/i],
+    quantity:[/quantity\s*[:\s]*/i,/qty\s*[:\s]*/i,/\bcount\s*[:\s]*/i],
+    product:[/product\s+(?:description|desc)[:\s]*/i,/material\s+description[:\s]*/i,/contents?[:\s]*/i,/\bproduct\s*[:\s]*/i],
+    sku:[/common\s+item\s+code[:\s]*/i,/item\s+code[:\s]*/i,/product\s*code[:\s]*/i,/\bsku\s*[:\s]*/i],
     variant:[/variant\s*[:\s]*/i],
     customerCode:[/customer\s*code[:\s]*/i],
     grossWeight:[/gross\s*weight[:\s]*/i,/net\s*weight[:\s]*/i,/weight\s*\(\s*kg\s*\)[:\s]*/i]
   };
-  
+
   for(const field in PATTERNS){
     if(out[field])continue;
     const patterns=PATTERNS[field];
     for(const pat of patterns){
-      const match=cleanText.search(pat);
-      if(match>=0){
-        // Extract text after the match
-        const after=cleanText.substring(match+pat.source.length);
-        // Take next up to 30 chars, then clean based on field
-        let cand=after.trim().substring(0,30);
-        // For sscc/gtin, take only digits
+      const m=pat.exec(cleanText);
+      if(m&&m[0]){
+        // Extract text after the actual matched length (NOT source length)
+        const after=cleanText.substring(m.index+m[0].length);
+        let cand=after.trim().substring(0,40);
         if(field==='sscc'||field==='gtin'){
-          const digits=cand.replace(/\D/g,'');
+          let digits=cand.replace(/\D/g,'');
+          if(field==='gtin'&&digits.length===13)digits='0'+digits; // pad 13->14
           if(field==='sscc'&&digits.length>=17)out[field]=digits.slice(0,18);
           else if(field==='gtin'&&digits.length===14)out[field]=digits;
         }else if(field==='bestBefore'||field==='prodDate'){
           const nd=normDate(cand);
           if(nd)out[field]=nd;
         }else if(field==='quantity'||field==='grossWeight'){
-          const cleaned=cand.replace(/\\D/g,'');
-          if(field==='quantity'){const n=+cleaned;if((Number.isInteger(n)||(n>=1&&n<=99999)))out[field]=cleaned;}
-          else if(field==='grossWeight'){const n=parseFloat(cand);if(n>=0.1&&n<=9999)out[field]=n.toString();}
+          const cleaned=cand.replace(/[^\d.]/g,'');
+          if(field==='quantity'){const n=parseInt(cleaned,10);if(Number.isInteger(n)&&n>=1&&n<=99999)out[field]=String(n);}
+          else if(field==='grossWeight'){const n=parseFloat(cleaned);if(n>=0.1&&n<=9999)out[field]=n.toString();}
         }else if(field==='product'||field==='sku'||field==='variant'||field==='customerCode'){
-          // Take text up to next known label or separator
-          const val=(cand.split(/\s{2}|[:;,\n]|(?<=\d)(?=\D)|(?<=\D)(?=\d)/).shift()||'').trim();
-          // Conservative: only accept if it contains expected chars and is short
-          if(val&&val.length<=60&&val.length>=3)out[field]=val;
+          const val=(cand.split(/\s{2}|[:;,|\n]|(?<=\d)(?=\D)|(?<=\D)(?=\d)/)[0]||'').trim();
+          if(val&&val.length>=2&&val.length<=60)out[field]=val;
         }else{
           const val=cand.split(/[\s,:;-]+/)[0];
           if(val)out[field]=val;
