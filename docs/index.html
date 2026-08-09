@@ -31,15 +31,17 @@ input[type=file]{color:var(--mut)}
 .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--line);color:var(--mut);margin-left:6px}
 .hidden{display:none}
 #busy.hidden,#preview.hidden{display:none}
+.region{position:absolute;border:2px dashed rgba(255,176,32,.9);background:rgba(255,176,32,.08);cursor:pointer;touch-action:none;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--warn);text-align:center;padding:2px;pointer-events:auto}
+.region .region-label{pointer-events:none}
+.region .region-remove{position:absolute;top:-8px;right:-8px;background:var(--bad);color:#fff;border-radius:50%;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:10px;cursor:pointer;pointer-events:auto}
 .dot{position:absolute;width:20px;height:20px;border-radius:50%;background:rgba(79,140,255,.9);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;transform:translate(-50%,-50%);pointer-events:none;border:2px solid #fff}
 .line{position:absolute;background:rgba(79,140,255,.85);pointer-events:none;height:3px;transform-origin:0 50%}
 #busy{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50;pointer-events:none}
 .spinner{width:42px;height:42px;border:4px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-pre#diag{white-space:pre-wrap;font:11px ui-monospace,monospace;color:var(--mut);max-height:200px;overflow:auto;margin:8px 0 0}
 progress{width:100%;height:10px}
+.pick{background:rgba(255,176,32,.18);color:var(--warn);border:1px solid var(--warn);padding:4px 8px;font-size:12px;margin-left:6px}
 </style>
-</head>
 <body>
 <div class="wrap">
   <h1>GS1 Label OCR</h1>
@@ -48,6 +50,7 @@ progress{width:100%;height:10px}
       <input type="file" id="file" accept="image/*" capture="environment">
       <button id="cropBtn" class="sec" disabled>Crop &amp; decode (4 taps)</button>
       <button id="decodeFullBtn" class="sec" disabled>Decode full image</button>
+      <button id="autoFillBtn" class="sec" disabled>Auto-fill missing (regions)</button>
     </div>
     <p class="banner info" id="gateBanner">Upload a label photo. Tap "Crop &amp; decode" and mark the 4 corners of the white label (TL, TR, BR, BL). Barcode + OCR run automatically — no manual entry needed.</p>
     <div class="stage" id="stage">
@@ -125,58 +128,127 @@ function cvPreprocess(inImg){
   }catch(e){diag("OpenCV preprocess error: "+e.message);return null;}
 }
 
-/* ---------- ZXing barcode decode (0.23 API: decodeFromImageElement) ---------- */
+/* ---------- ZXing barcode decode (0.23 API) ---------- */
 let zxReader=null;
 function zxHints(){
   const BF=ZXing.BarcodeFormat;
   const h=new Map();
   h.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[BF.ITF,BF.EAN_13,BF.CODE_128,BF.CODE_39,BF.CODE_93,BF.UPC_A,BF.UPC_E]);
+  h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[BF.ITF,BF.EAN_13,BF.CODE_128,BF.CODE_39,BF.CODE_93,BF.UPC_A,BF.UPC_E,BF.DATA_MATRIX,BF.QR_CODE]);
   return h;
 }
-async function decodeBarcode(canvas,imgEl){
-  if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
+async function tryDecode(el,hints){
+  if(typeof ZXing==='undefined'||!zxReader)return null;
   try{
-    if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
-    const src=imgEl||canvas;
-    try{
-      const res=await zxReader.decodeFromImageElement(src,zxHints());
-      if(res)return [res.getText()];
-    }catch(_){}
-    return [];
-  }catch(e){
-    diag("ZXing: no barcode found in this crop.");
-    return [];
-  }
+    const res=el.tagName==='IMG'?await zxReader.decodeFromImageElement(el,hints)
+                                 :await zxReader.decodeFromCanvas(el,hints);
+    if(res&&res.getText())return res.getText();
+  }catch(_){}
+  return null;
 }
-
-/* Full-image sweep: try horizontal + vertical strips to localize barcodes */
-async function sweepFullImage(imgEl){
-  const w=imgEl.naturalWidth||imgEl.width, h=imgEl.naturalHeight||imgEl.height;
-  const strips=[];
-  // horizontal bands
-  for(const [yf,hh] of [[0,0.2],[0.4,0.2],[0.8,0.2]]){
-    strips.push({x:0,y:Math.round(h*yf),width:w,height:Math.round(h*hh)});
+function binarize(canvas,thresh){
+  thresh=thresh||128;
+  const c=document.createElement('canvas');c.width=canvas.width;c.height=canvas.height;
+  const ctx=c.getContext('2d');ctx.drawImage(canvas,0,0);
+  const d=ctx.getImageData(0,0,c.width,c.height);const px=d.data;
+  for(let i=0;i<px.length;i+=4){const lum=0.299*px[i]+0.587*px[i+1]+0.114*px[i+2];const v=lum<thresh?0:255;px[i]=px[i+1]=px[i+2]=v;}
+  ctx.putImageData(d,0,0);
+  return c;
+}
+function upscaleCanvas(canvas,factor){
+  const c=document.createElement('canvas');c.width=Math.round(canvas.width*factor);c.height=Math.round(canvas.height*factor);
+  const ctx=c.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(canvas,0,0,c.width,c.height);
+  return c;
+}
+/* Auto-detect the white label region via dark-pixel (text) projection, returns cropped canvas or null */
+function autoCropCanvas(srcCanvas){
+  if(!srcCanvas)return null;
+  const SCAN=1000;
+  const s=SCAN/Math.max(srcCanvas.width,srcCanvas.height);
+  const tmp=document.createElement('canvas');
+  tmp.width=Math.round(srcCanvas.width*s);tmp.height=Math.round(srcCanvas.height*s);
+  tmp.getContext('2d').drawImage(srcCanvas,0,0,tmp.width,tmp.height);
+  const ctx=tmp.getContext('2d');
+  const d=ctx.getImageData(0,0,tmp.width,tmp.height).data;
+  const colD=new Array(tmp.width).fill(0),rowD=new Array(tmp.height).fill(0);
+  for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){
+    const i=(y*tmp.width+x)*4;const lum=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+    if(lum<60){colD[x]++;rowD[y]++;}
   }
-  // vertical bands (right side often has barcodes)
-  for(const [xf,ww] of [[0.7,0.3],[0,0.3]]){
-    strips.push({x:Math.round(w*xf),y:0,width:Math.round(w*ww),height:h});
+  const cxT=tmp.height*0.015,ryT=tmp.width*0.01;
+  let x0=tmp.width,x1=0,y0=tmp.height,y1=0;
+  for(let x=0;x<tmp.width;x++)if(colD[x]>cxT){x0=Math.min(x0,x);x1=Math.max(x1,x);}
+  for(let y=0;y<tmp.height;y++)if(rowD[y]>ryT){y0=Math.min(y0,y);y1=Math.max(y1,y);}
+  if(x1>x0&&y1>y0&&(x1-x0)<tmp.width*0.98&&(y1-y0)<tmp.height*0.98){
+    const px=Math.round((x1-x0)*0.04/srcCanvas.width),py=Math.round((y1-y0)*0.04/srcCanvas.height);
+    const fx0=Math.max(0,Math.round(x0/s)-px),fy0=Math.max(0,Math.round(y0/s)-py);
+    const fx1=Math.min(srcCanvas.width,Math.round(x1/s)+px),fy1=Math.min(srcCanvas.height,Math.round(y1/s)+py);
+    const c=document.createElement('canvas');c.width=fx1-fx0;c.height=fy1-fy0;
+    c.getContext('2d').drawImage(srcCanvas,fx0,fy0,c.width,c.height,0,0,c.width,c.height);
+    return c;
   }
-  const out=[];
-  for(const s of strips){
-    const c=document.createElement("canvas");
-    c.width=s.width;c.height=s.height;
-    c.getContext("2d").drawImage(imgEl,s.x,s.y,s.width,s.height,0,0,s.width,s.height);
-    const found=await decodeBarcode(c,null);
-    out.push(...found);
+  return null;
+}
+/* Robust barcode decode: full image -> auto-crop -> binarized/upscaled -> horizontal bands */
+async function decodeBarcodesRobust(imgEl){
+  if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
+  if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
+  const hints=zxHints();
+  const found=new Set();
+  const tryAdd=c=>{if(c)found.add(c);};
+  // 1. whole image
+  tryAdd(await tryDecode(imgEl,hints));
+  // 2. auto-cropped label region
+  const crop=autoCropCanvas(imgToCanvas(imgEl));
+  if(crop){
+    tryAdd(await tryDecode(crop,hints));
+    tryAdd(await tryDecode(upscaleCanvas(binarize(crop),2),hints));
+    // horizontal bands across the label (barcodes are usually full-width strips)
+    const bands=sliceHorizontal(crop,8);
+    for(const b of bands){
+      tryAdd(await tryDecode(b,hints));
+      tryAdd(await tryDecode(upscaleCanvas(binarize(b),2),hints));
+    }
+  }
+  return [...found];
+}
+function sliceHorizontal(canvas,n){
+  const out=[];const bandH=Math.max(1,Math.round(canvas.height/n));
+  for(let i=0;i<n;i++){
+    const y=i*bandH;const h=Math.min(bandH,canvas.height-y);
+    if(h<4)continue;
+    const c=document.createElement('canvas');c.width=canvas.width;c.height=h;
+    c.getContext('2d').drawImage(canvas,0,y,canvas.width,h,0,0,canvas.width,h);
+    out.push(c);
   }
   return out;
 }
-
-/* Fallback: sweep the full image in horizontal + vertical strips to find barcodes
-   when no 4-tap crop was made (raw full photo). */
+/* Public: decode from a canvas or image (used by runDecode) */
+async function decodeBarcode(canvas,imgEl){
+  if(typeof ZXing==='undefined'){diag("ZXing not loaded.");return [];}
+  if(!zxReader)zxReader=new ZXing.BrowserMultiFormatReader();
+  const hints=zxHints();
+  const found=new Set();
+  const src=imgEl||canvas;
+  const tryAdd=c=>{if(c)found.add(c);};
+  tryAdd(await tryDecode(src,hints));
+  const crop=autoCropCanvas(canvas||imgToCanvas(imgEl));
+  if(crop){
+    tryAdd(await tryDecode(crop,hints));
+    tryAdd(await tryDecode(upscaleCanvas(binarize(crop),2),hints));
+    for(const b of sliceHorizontal(crop,8)){
+      tryAdd(await tryDecode(b,hints));
+      tryAdd(await tryDecode(upscaleCanvas(binarize(b),2),hints));
+    }
+  }
+  return [...found];
+}
+/* Full-image sweep fallback (kept for compatibility) */
+async function sweepFullImage(imgEl){
+  return decodeBarcodesRobust(imgEl);
+}
 async function decodeBarcodeFull(imgEl){
-  return sweepFullImage(imgEl);
+  return decodeBarcodesRobust(imgEl);
 }
 
 /* ---------- Tesseract OCR (auto-crop label region + downscale + PSM 3) ---------- */
@@ -412,11 +484,16 @@ function renderFields(fields){
     const lab=document.createElement("label");lab.textContent=k;
     const inp=document.createElement("input");inp.id="in_"+k;inp.value=v;inp.readOnly=!!v;
     const src=document.createElement("span");src.className="src "+(v?"ok":"empty");src.textContent=v?"auto":"empty";
-    row.appendChild(lab);row.appendChild(inp);row.appendChild(src);box.appendChild(row);
+    const pick=document.createElement("button");pick.className="sec pick";pick.textContent="✎ region";
+    pick.title="Mark the region on the image for this field";
+    pick.addEventListener("click",e=>{e.stopPropagation();enableFieldRegionPick(k);});
+    row.appendChild(lab);row.appendChild(inp);row.appendChild(src);row.appendChild(pick);
+    box.appendChild(row);
     if(v)locked++;
   }
   $("confSummary").textContent=locked+" auto · "+(all.length-locked)+" empty";
   $("fieldsCard").classList.remove("hidden");
+  $("autoFillBtn").disabled=false;
 }
 function clearCornersUI(){tapCorners=[];$("dots").innerHTML="";}
 function drawDot(x,y,label){const d=document.createElement("div");d.className="dot";d.textContent=label;d.style.left=(x/imgNat.w*100)+"%";d.style.top=(y/imgNat.h*100)+"%";$("dots").appendChild(d);}
@@ -486,8 +563,98 @@ function warpCanvas(img,corners){
   return out;
 }
 
-imgEl.addEventListener("click",async e=>{
-  if(imgEl.classList.contains("hidden")||!cropModeOn)return;
+/* ---------- Field naming DB (localStorage): raw OCR text -> canonical field ---------- */
+const DB_KEY='labelOcrFieldDb';
+function loadFieldDb(){try{return JSON.parse(localStorage.getItem(DB_KEY))||{};}catch(_){return {};}}
+function saveFieldDb(db){try{localStorage.setItem(DB_KEY,JSON.stringify(db));}catch(_){}}
+function normalizeNameDb(t){return (t||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
+function lookupCanonical(name){const db=loadFieldDb();return db[normalizeNameDb(name)]||null;}
+function learnNameDb(name,canonical){const db=loadFieldDb();db[normalizeNameDb(name)]=canonical;saveFieldDb(db);diag("Learned: '"+name+"' → "+canonical);}
+
+/* ---------- Region selection for manual field-mapping ---------- */
+let regionModeField=null;        // field currently being mapped
+let regionStart=null;            // {x,y} in image coords
+let regionCurrent=null;
+let regions=[];                  // {field, x0,y0,x1,y1} in image coords
+
+function fieldLabelEl(k){return document.querySelector('#fields .field input#in_'+k);}
+function setFieldValue(k,v,srcTag){
+  const el=fieldLabelEl(k);if(!el)return;
+  el.value=v;el.readOnly=true;
+  const src=el.parentElement.querySelector('.src');
+  if(src){src.className='src '+(v?'ok':'empty');src.textContent=v?('auto'+(srcTag?'·'+srcTag:'')):'empty';}
+}
+
+async function ocrRegionCrop(x0,y0,x1,y1,field){
+  x0=Math.max(0,Math.round(x0));y0=Math.max(0,Math.round(y0));
+  x1=Math.min(imgNat.w,Math.round(x1));y1=Math.min(imgNat.h,Math.round(y1));
+  const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0);
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  c.getContext('2d').drawImage(imgEl,x0,y0,w,h,0,0,w,h);
+  // upscale small crops for OCR accuracy
+  let src=c;const minSide=Math.min(w,h);
+  if(minSide<900){const f=Math.max(2,Math.round(900/minSide));src=upscaleCanvas(c,f);}
+  const {data}=await Tesseract.recognize(src,'eng',{parameters:{tessedit_pageseg_mode:'6'}});
+  const text=(data.text||'').replace(/\s+/g,' ').trim();
+  return cleanField(field,text);
+}
+
+function drawRegion(r){
+  const box=document.createElement('div');box.className='region';
+  box.style.left=(r.x0/imgNat.w*100)+'%';box.style.top=(r.y0/imgNat.h*100)+'%';
+  box.style.width=((r.x1-r.x0)/imgNat.w*100)+'%';box.style.height=((r.y1-r.y0)/imgNat.h*100)+'%';
+  const lab=document.createElement('div');lab.className='region-label';lab.textContent=r.field;
+  box.appendChild(lab);
+  const rm=document.createElement('div');rm.className='region-remove';rm.textContent='×';
+  rm.addEventListener('click',e=>{e.stopPropagation();regions=regions.filter(x=>x!==r);box.remove();});
+  box.appendChild(rm);
+  box.addEventListener('click',e=>{e.stopPropagation();if(regionModeField)return;regionStart={x:r.x0,y:r.y0};regionCurrent={x:r.x1,y:r.y1};drawRegionDrag(r);});
+  $('dots').appendChild(box);
+}
+function drawRegionDrag(r){
+  const existing=document.querySelector('.region.dragging');if(existing)existing.remove();
+  const box=document.createElement('div');box.className='region dragging';
+  box.style.left=(regionStart.x/imgNat.w*100)+'%';box.style.top=(regionStart.y/imgNat.h*100)+'%';
+  box.style.width=((regionCurrent.x-regionStart.x)/imgNat.w*100)+'%';
+  box.style.height=((regionCurrent.y-regionStart.y)/imgNat.h*100)+'%';
+  const lab=document.createElement('div');lab.className='region-label';lab.textContent='Adjust';
+  box.appendChild(lab);
+  $('dots').appendChild(box);
+  const move=ev=>{ev.stopPropagation();const rct=imgEl.getBoundingClientRect();
+    const nx=(ev.clientX-rct.left)/rct.width*imgNat.w,ny=(ev.clientY-rct.top)/rct.height*imgNat.h;
+    regionCurrent={x:nx,y:ny};
+    box.style.width=((nx-regionStart.x)/imgNat.w*100)+'%';box.style.height=((ny-regionStart.y)/imgNat.h*100)+'%';};
+  const up=async ev=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);box.remove();
+    const v=await ocrRegionCrop(regionStart.x,regionStart.y,regionCurrent.x,regionCurrent.y,r.field);
+    const [a,b]=regionStart.x<regionCurrent.x?[regionStart.x,regionCurrent.x]:[regionCurrent.x,regionStart.x];
+    const [c,d]=regionStart.y<regionCurrent.y?[regionStart.y,regionCurrent.y]:[regionCurrent.y,regionStart.y];
+    r.x0=a;r.y0=c;r.x1=b;r.y1=d;
+    if(v){setFieldValue(r.field,v,'region');}
+    refreshFieldsCard();
+  };
+  window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+}
+
+function refreshFieldsCard(){
+  // re-render conf summary from current inputs
+  const rows=document.querySelectorAll('#fields .field');
+  let locked=0;
+  rows.forEach(r=>{const i=r.querySelector('input');if(i&&i.value)locked++;});
+  $('confSummary').textContent=locked+' auto · '+(rows.length-locked)+' empty';
+}
+
+/* Allow field tapping to enter region-mapping mode */
+function enableFieldRegionPick(k){
+  regionModeField=k;
+  $('gateBanner').textContent='Tap the region on the image where "'+k+'" (or its label) appears. Then drag to size the box.';
+  $('preview').style.cursor='crosshair';
+}
+
+imgEl.addEventListener("pointerdown",e=>{
+  if(imgEl.classList.contains("hidden")||!cropModeOn){
+    // Region-mapping mode or region-drag
+    if(regionModeField||regionStart)handleRegionPointer(e);return;
+  }
   const r=imgEl.getBoundingClientRect();
   const cx=e.clientX-r.left,cy=e.clientY-r.top;
   if(cx<0||cy<0||cx>r.width||cy>r.height)return;
@@ -507,6 +674,44 @@ imgEl.addEventListener("click",async e=>{
     renderFields(fields);
   }
 });
+function handleRegionPointer(e){
+  e.stopPropagation();e.preventDefault();
+  const r=imgEl.getBoundingClientRect();
+  const toImg=ev=>({x:Math.round((ev.clientX-r.left)/r.width*imgNat.w),y:Math.round((ev.clientY-r.top)/r.height*imgNat.h)});
+  if(regionModeField&&!regionStart){
+    regionStart=toImg(e);regionCurrent={...regionStart};
+    const mv=ev=>{regionCurrent=toImg(ev);};
+    const up=async ()=>{
+      window.removeEventListener('pointermove',mv);window.removeEventListener('pointerup',up);
+      const v=await ocrRegionCrop(regionStart.x,regionStart.y,regionCurrent.x,regionCurrent.y,regionModeField);
+      if(v)setFieldValue(regionModeField,v,'region');
+      const [a,b]=regionStart.x<regionCurrent.x?[regionStart.x,regionCurrent.x]:[regionCurrent.x,regionStart.x];
+      const [c,d]=regionStart.y<regionCurrent.y?[regionStart.y,regionCurrent.y]:[regionCurrent.y,regionStart.y];
+      regions.push({field:regionModeField,x0:a,y0:c,x1:b,y1:d});
+      drawRegion(regions[regions.length-1]);
+      regionModeField=null;regionStart=null;regionCurrent=null;
+      $('preview').style.cursor='default';
+      $('gateBanner').textContent='Region set. Use "Auto-fill missing" or tap another empty field then its region.';
+      refreshFieldsCard();
+    };
+    window.addEventListener('pointermove',mv);window.addEventListener('pointerup',up);
+  }else if(regionStart&&!regionModeField){
+    regionCurrent=toImg(e);
+    const mv=ev=>{regionCurrent=toImg(ev);};
+    const up=async ()=>{
+      window.removeEventListener('pointermove',mv);window.removeEventListener('pointerup',up);
+      const v=await ocrRegionCrop(regionStart.x,regionStart.y,regionCurrent.x,regionCurrent.y,regionModeField);
+      if(v)setFieldValue(regionModeField,v,'region');
+      const [a,b]=regionStart.x<regionCurrent.x?[regionStart.x,regionCurrent.x]:[regionCurrent.x,regionStart.x];
+      const [c,d]=regionStart.y<regionCurrent.y?[regionStart.y,regionCurrent.y]:[regionCurrent.y,regionStart.y];
+      regions.push({field:regionModeField,x0:a,y0:c,x1:b,y1:d});
+      drawRegion(regions[regions.length-1]);
+      regionModeField=null;regionStart=null;regionCurrent=null;
+      $('preview').style.cursor='default';refreshFieldsCard();
+    };
+    window.addEventListener('pointermove',mv);window.addEventListener('pointerup',up);
+  }
+}
 
 $("file").addEventListener("change",async e=>{
   const f=e.target.files[0];if(!f)return;
@@ -531,6 +736,33 @@ $("decodeFullBtn").addEventListener("click",async()=>{
   diag("Decoding full image…");
   const fields=await runDecode(c,"full");
   renderFields(fields);
+});
+$("autoFillBtn").addEventListener("click",async()=>{
+  clearDiag();
+  const rows=document.querySelectorAll("#fields .field");
+  const missing=[];
+  for(const row of rows){
+    const k=row.querySelector("label").textContent.trim();
+    const el=row.querySelector("input");
+    if(!el.value){missing.push(k);}
+  }
+  if(!missing.length){diag("All fields filled.");return;}
+  diag("Auto-filling missing: "+missing.join(", "));
+  const words=await runOcr(imgToCanvas(imgEl));
+  const wtext=words.map(w=>w.text).join(" ");
+  for(const k of missing){
+    const anchors=FIELD_ANCHORS[k]||[];
+    let found="";
+    for(const ach of anchors){
+      const idx=wtext.toLowerCase().indexOf(ach.toLowerCase());
+      if(idx>=0){found=wtext.slice(idx+ach.length).trim().substring(0,40);break;}
+    }
+    if(found){
+      const v=cleanField(k,found);
+      setFieldValue(k,(v||found.trim()),"autofill");
+    }
+  }
+  refreshFieldsCard();
 });
 $("exportCsv").addEventListener("click",()=>{
   const out=[["field","value"]];
