@@ -394,7 +394,7 @@ function extractFromWords(words){
           if(field==='sscc'&&digits.length>=17)out[field]=digits.slice(0,18);
           else if(field==='gtin'&&digits.length===14)out[field]=digits;
         }else if(field==='bestBefore'||field==='prodDate'){
-          const nd=normDate(cand);
+          const nd=normDate(cand.split(/[|\n\r]/)[0]);
           if(nd)out[field]=nd;
         }else if(field==='quantity'||field==='grossWeight'){
           const cleaned=cand.replace(/[^\d.]/g,'');
